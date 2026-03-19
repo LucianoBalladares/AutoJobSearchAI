@@ -2,11 +2,15 @@ import requests
 from bs4 import BeautifulSoup
 import sqlite3
 from datetime import datetime
+import time
 
 BASE_URL = "https://www.chiletrabajos.cl"
 SEARCH_URL = BASE_URL + "/buscar"
+DB_PATH = "data/jobs.db"
 
-DB_PATH = "jobs.db"
+# filtros simples (luego los movemos a config)
+POSITIVE_KEYWORDS = ["data", "analista", "bi", "sql"]
+NEGATIVE_KEYWORDS = ["senior", "ventas", "call center"]
 
 
 def init_db():
@@ -51,9 +55,35 @@ def save_job(job):
         ))
         conn.commit()
     except sqlite3.IntegrityError:
-        pass  # duplicado por URL
+        pass
 
     conn.close()
+
+
+def keyword_filter(text):
+    text = text.lower()
+
+    if any(neg in text for neg in NEGATIVE_KEYWORDS):
+        return False
+
+    if any(pos in text for pos in POSITIVE_KEYWORDS):
+        return True
+
+    return False
+
+
+def get_job_description(url):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers)
+
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    desc = soup.select_one("#descripcion")  # selector típico
+
+    if desc:
+        return desc.get_text(separator=" ", strip=True)
+
+    return ""
 
 
 def scrape_page(page=1, keyword="data"):
@@ -62,16 +92,13 @@ def scrape_page(page=1, keyword="data"):
         "p": page
     }
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     r = requests.get(SEARCH_URL, params=params, headers=headers)
     soup = BeautifulSoup(r.text, "html.parser")
 
     jobs = []
-
-    cards = soup.select("div.card")  # estructura típica
+    cards = soup.select("div.card")
 
     for card in cards:
         try:
@@ -83,11 +110,20 @@ def scrape_page(page=1, keyword="data"):
             location = card.select_one(".lugar").text.strip() if card.select_one(".lugar") else ""
             date = card.select_one(".fecha").text.strip() if card.select_one(".fecha") else ""
 
+            # scrape description (slow part)
+            description = get_job_description(url)
+            time.sleep(1)  # evitar bloqueo
+
+            full_text = f"{title} {description}"
+
+            if not keyword_filter(full_text):
+                continue
+
             job = {
                 "title": title,
                 "company": company,
                 "location": location,
-                "description": "",  # lo llenamos después si queremos
+                "description": description,
                 "url": url,
                 "date": date,
                 "source": "chiletrabajos",
@@ -112,10 +148,10 @@ def run_scraper(pages=2, keyword="data"):
         for job in jobs:
             save_job(job)
 
-        print(f"Saved {len(jobs)} jobs")
+        print(f"Saved {len(jobs)} filtered jobs")
 
     print("Done.")
 
 
 if __name__ == "__main__":
-    run_scraper(pages=3, keyword="data")
+    run_scraper(pages=2, keyword="data")
