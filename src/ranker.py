@@ -1,7 +1,9 @@
+from dotenv import load_dotenv
 import sqlite3
 from openai import OpenAI
 import os
 
+load_dotenv()
 DB_PATH = "data/jobs.db"
 PROFILE_PATH = "config/profile.txt"
 
