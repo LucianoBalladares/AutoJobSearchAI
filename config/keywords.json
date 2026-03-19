@@ -1,0 +1,4 @@
+{
+  "positive": ["data", "analista", "bi", "sql", "python", "analytics"],
+  "negative": ["senior", "ventas", "call center"]
+}
