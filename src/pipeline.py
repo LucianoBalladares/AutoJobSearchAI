@@ -1,17 +1,19 @@
 from src.scrapers.chiletrabajos import run_scraper
-from src.filter import run_filter, init_column
-
+from src.filter import run_filter, init_column as init_filter
+from src.ranker import run_ranker
 
 def run_pipeline():
     print("=== SCRAPING ===")
     run_scraper(pages=2, keyword="data")
 
     print("=== FILTERING ===")
-    init_column()
+    init_filter()
     run_filter()
 
-    print("=== DONE ===")
+    print("=== RANKING ===")
+    run_ranker(limit=20)
 
+    print("=== DONE ===")
 
 if __name__ == "__main__":
     run_pipeline()
