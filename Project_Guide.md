@@ -1,7 +1,9 @@
 # Sistema Automatizado de Búsqueda de Empleo con IA
 
 ## 1. Objetivo
+
 Construir un sistema automatizado que permita:
+
 - Recolectar ofertas laborales relevantes
 - Filtrarlas inteligentemente
 - Priorizarlas según fit con el perfil
@@ -19,6 +21,7 @@ Pipeline:
 Job Scraper → Job Database → Filtering → AI Ranking → Application Generator → Output
 
 Salida diaria:
+
 - Lista priorizada de empleos
 - Borradores de postulación
 
@@ -27,10 +30,12 @@ Salida diaria:
 ## 3. Componentes del Sistema
 
 ### 3.1 Job Scraper
+
 Función:
 Recolectar ofertas desde múltiples fuentes.
 
 Fuentes:
+
 - LinkedIn
 - Indeed
 - Chiletrabajos
@@ -38,12 +43,14 @@ Fuentes:
 - GetOnBoard
 
 Tecnologías:
+
 - Python
 - Requests
 - BeautifulSoup
 - Playwright (para sitios dinámicos)
 
 Datos a recolectar:
+
 - title
 - company
 - location
@@ -58,12 +65,14 @@ Datos a recolectar:
 ### 3.2 Base de Datos
 
 Opciones:
+
 - CSV (simple)
 - SQLite (recomendado)
 
 Estructura sugerida:
 
 Tabla: jobs
+
 - id
 - title
 - company
@@ -75,6 +84,7 @@ Tabla: jobs
 - score
 
 Tabla: applications
+
 - id
 - job_id
 - date_applied
@@ -86,8 +96,9 @@ Tabla: applications
 ### 3.3 Filtering (Pre-AI)
 
 Filtro por keywords:
-
+\*\*Keywords temporales, cambiaran a futuro
 Positivas:
+
 - data
 - analista
 - bi
@@ -96,6 +107,7 @@ Positivas:
 - analytics
 
 Negativas:
+
 - senior
 - ventas
 - call center
@@ -108,42 +120,24 @@ Objetivo:
 Evaluar qué tan bien encaja cada trabajo con el perfil.
 
 Input:
+
 - Descripción del trabajo
 - Perfil del candidato
 
 Output:
+
 - Score (1–10)
 
 Ejemplo de prompt:
 
 "Evaluate this job description for a candidate with:
+
 - Medical Technologist
 - Health Informatics training
 - Power BI, SQL, Python
 - English C2
 
 Score from 1 to 10 and justify briefly."
-
----
-
-### 3.5 Application Generator
-
-Función:
-Generar automáticamente:
-- Cover letter
-- Email
-- Mensaje LinkedIn
-
-Input:
-- CV
-- Job description
-
-Output:
-- Texto listo para enviar
-
-Prompt ejemplo:
-
-"Write a concise 150-word cover letter tailored to this job using the candidate profile."
 
 ---
 
@@ -154,10 +148,10 @@ Archivo generado diariamente:
 jobs_today.md
 
 Contenido:
-- Top 10 trabajos
+
+- Top trabajos
 - Score
 - Links
-- Borradores de postulación
 
 ---
 
@@ -165,13 +159,13 @@ Contenido:
 
 Uso de cron (Linux):
 
-0 8 * * * python job_pipeline.py
+0 8 \* \* \* python job_pipeline.py
 
 Ejecuta diariamente:
+
 - Scraping
 - Filtrado
 - Ranking
-- Generación
 
 ---
 
@@ -179,11 +173,8 @@ Ejecuta diariamente:
 
 1. Abrir jobs_today.md
 2. Revisar top trabajos
-3. Ajustar CV si es necesario
+3. Ajustar CV de manera manual
 4. Enviar postulaciones
-
-Tiempo estimado:
-15–25 minutos diarios
 
 ---
 
@@ -192,20 +183,28 @@ Tiempo estimado:
 /job-search-ai
 
 /src
+
 - scraper.py
 - filter.py
 - ranker.py
-- generator.py
 - pipeline.py
+- output.py
+
+/src/scrapers
+
+- chiletrabajos.py
 
 /data
+
 - jobs.db
 - applications.csv
 
 /output
+
 - jobs_today.md
 
 /config
+
 - keywords.json
 - profile.txt
 
@@ -228,34 +227,3 @@ Tiempo estimado:
 - Tasa de entrevistas
 
 ---
-
-## 9. Roadmap de Implementación
-
-Día 1:
-- Scraper básico
-
-Día 2:
-- Base de datos + filtering
-
-Día 3:
-- AI ranking
-
-Día 4:
-- Generador de postulaciones
-
-Día 5:
-- Automatización
-
----
-
-## 10. Consideraciones Finales
-
-- No sobre-ingenierizar
-- Priorizar velocidad de ejecución
-- Iterar rápidamente
-- Medir resultados
-
----
-
-Este sistema está diseñado para maximizar eficiencia y volumen de postulaciones de alta calidad en el menor tiempo posible.
-
