@@ -8,10 +8,6 @@ BASE_URL = "https://www.chiletrabajos.cl"
 SEARCH_URL = BASE_URL + "/buscar"
 DB_PATH = "data/jobs.db"
 
-# filtros simples (luego los movemos a config)
-POSITIVE_KEYWORDS = ["data", "analista", "bi", "sql"]
-NEGATIVE_KEYWORDS = ["senior", "ventas", "call center"]
-
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -60,43 +56,35 @@ def save_job(job):
     conn.close()
 
 
-def keyword_filter(text):
-    text = text.lower()
+def get_existing_urls():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
 
-    if any(neg in text for neg in NEGATIVE_KEYWORDS):
-        return False
+    rows = c.execute("SELECT url FROM jobs").fetchall()
+    conn.close()
 
-    if any(pos in text for pos in POSITIVE_KEYWORDS):
-        return True
-
-    return False
+    return set(r[0] for r in rows)
 
 
 def get_job_description(url):
     headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers)
+
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return ""
+    except requests.RequestException:
+        return ""
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    desc = soup.select_one("#descripcion")  # selector típico
+    desc = soup.select_one("#descripcion")
 
     if desc:
         return desc.get_text(separator=" ", strip=True)
 
     return ""
 
-
-def job_exists(url):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    result = c.execute(
-        "SELECT 1 FROM jobs WHERE url=?",
-        (url,)
-    ).fetchone()
-
-    conn.close()
-    return result is not None
 
 def scrape_page(page=1, keyword="data"):
     params = {
@@ -106,34 +94,40 @@ def scrape_page(page=1, keyword="data"):
 
     headers = {"User-Agent": "Mozilla/5.0"}
 
-    r = requests.get(SEARCH_URL, params=params, headers=headers)
+    try:
+        r = requests.get(SEARCH_URL, params=params, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return []
+    except requests.RequestException:
+        return []
+
     soup = BeautifulSoup(r.text, "html.parser")
 
     jobs = []
     cards = soup.select("div.card")
 
+    existing_urls = get_existing_urls()
+
     for card in cards:
         try:
             title_tag = card.select_one("h2 a")
+            if not title_tag:
+                continue
+
             title = title_tag.text.strip()
             url = BASE_URL + title_tag["href"]
 
-            # SKIP si ya existe
-            if job_exists(url):
+            # skip duplicados
+            if url in existing_urls:
                 continue
 
             company = card.select_one(".empresa").text.strip() if card.select_one(".empresa") else ""
             location = card.select_one(".lugar").text.strip() if card.select_one(".lugar") else ""
             date = card.select_one(".fecha").text.strip() if card.select_one(".fecha") else ""
 
-            # scrape description (slow part)
+            # descripción (solo si es nuevo)
             description = get_job_description(url)
-            time.sleep(1)  # evitar bloqueo
-
-            full_text = f"{title} {description}"
-
-            if not keyword_filter(full_text):
-                continue
+            time.sleep(1)
 
             job = {
                 "title": title,
@@ -164,7 +158,7 @@ def run_scraper(pages=2, keyword="data"):
         for job in jobs:
             save_job(job)
 
-        print(f"Saved {len(jobs)} filtered jobs")
+        print(f"Saved {len(jobs)} new jobs")
 
     print("Done.")
 

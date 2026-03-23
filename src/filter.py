@@ -6,8 +6,11 @@ KEYWORDS_PATH = "config/keywords.json"
 
 
 def load_keywords():
-    with open(KEYWORDS_PATH, "r") as f:
-        return json.load(f)
+    try:
+        with open(KEYWORDS_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"positive": [], "negative": []}
 
 
 def init_column():
@@ -18,7 +21,7 @@ def init_column():
     columns = [col[1] for col in c.fetchall()]
 
     if "filtered" not in columns:
-        c.execute("ALTER TABLE jobs ADD COLUMN filtered INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE jobs ADD COLUMN filtered INTEGER")
 
     conn.commit()
     conn.close()
@@ -44,7 +47,11 @@ def run_filter():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    rows = c.execute("SELECT id, title, description FROM jobs").fetchall()
+    rows = c.execute("""
+        SELECT id, title, description 
+        FROM jobs 
+        WHERE filtered IS NULL OR filtered = 0
+    """).fetchall()
 
     for job_id, title, desc in rows:
         text = f"{title} {desc or ''}"

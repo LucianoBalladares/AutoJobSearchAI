@@ -7,8 +7,11 @@ load_dotenv()
 DB_PATH = "data/jobs.db"
 PROFILE_PATH = "config/profile.txt"
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise ValueError("OPENAI_API_KEY not set")
 
+client = OpenAI(api_key=api_key)
 
 def init_column():
     conn = sqlite3.connect(DB_PATH)
@@ -41,17 +44,17 @@ Job description:
 Return ONLY a number from 1 to 10.
 """
 
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0
-    )
-
-    text = response.choices[0].message.content.strip()
-
     try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+
+        text = response.choices[0].message.content.strip()
         return int(text)
-    except:
+
+    except Exception:
         return None
 
 
@@ -82,8 +85,8 @@ def run_ranker(limit=20):
                 "UPDATE jobs SET score=? WHERE id=?",
                 (score, job_id)
             )
-            conn.commit()
 
+    conn.commit()
     conn.close()
     print("Ranking done.")
 
