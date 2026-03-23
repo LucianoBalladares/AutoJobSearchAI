@@ -86,6 +86,18 @@ def get_job_description(url):
     return ""
 
 
+def job_exists(url):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    result = c.execute(
+        "SELECT 1 FROM jobs WHERE url=?",
+        (url,)
+    ).fetchone()
+
+    conn.close()
+    return result is not None
+
 def scrape_page(page=1, keyword="data"):
     params = {
         "q": keyword,
@@ -105,6 +117,10 @@ def scrape_page(page=1, keyword="data"):
             title_tag = card.select_one("h2 a")
             title = title_tag.text.strip()
             url = BASE_URL + title_tag["href"]
+
+            # SKIP si ya existe
+            if job_exists(url):
+                continue
 
             company = card.select_one(".empresa").text.strip() if card.select_one(".empresa") else ""
             location = card.select_one(".lugar").text.strip() if card.select_one(".lugar") else ""
