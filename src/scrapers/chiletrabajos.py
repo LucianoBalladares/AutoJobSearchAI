@@ -5,14 +5,14 @@ from datetime import datetime
 import time
 
 BASE_URL = "https://www.chiletrabajos.cl"
-SEARCH_URL = BASE_URL + "/buscar"
+SEARCH_URL = BASE_URL + "/encuentra-un-empleo"
 DB_PATH = "data/jobs.db"
+PAGE_SIZE = 30  # el sitio muestra 30 ofertas por página
 
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     c.execute("""
     CREATE TABLE IF NOT EXISTS jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,7 +26,6 @@ def init_db():
         created_at TEXT
     )
     """)
-
     conn.commit()
     conn.close()
 
@@ -34,115 +33,118 @@ def init_db():
 def save_job(job):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     try:
         c.execute("""
         INSERT INTO jobs (title, company, location, description, url, date, source, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            job["title"],
-            job["company"],
-            job["location"],
-            job["description"],
-            job["url"],
-            job["date"],
-            job["source"],
-            job["created_at"]
+            job["title"], job["company"], job["location"], job["description"],
+            job["url"], job["date"], job["source"], job["created_at"]
         ))
         conn.commit()
     except sqlite3.IntegrityError:
         pass
-
     conn.close()
 
 
 def get_existing_urls():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     rows = c.execute("SELECT url FROM jobs").fetchall()
     conn.close()
-
     return set(r[0] for r in rows)
 
 
 def get_job_description(url):
     headers = {"User-Agent": "Mozilla/5.0"}
-
     try:
         r = requests.get(url, headers=headers, timeout=10)
         if r.status_code != 200:
             return ""
     except requests.RequestException:
         return ""
-
     soup = BeautifulSoup(r.text, "html.parser")
-
     desc = soup.select_one("#descripcion")
-
-    if desc:
-        return desc.get_text(separator=" ", strip=True)
-
-    return ""
+    return desc.get_text(separator=" ", strip=True) if desc else ""
 
 
 def scrape_page(page=1, keyword="data"):
-    params = {
-        "q": keyword,
-        "p": page
-    }
+    # Paginación por offset: página 1 = /encuentra-un-empleo, página 2 = /encuentra-un-empleo/30, etc.
+    offset = (page - 1) * PAGE_SIZE
+    if offset == 0:
+        url = SEARCH_URL
+    else:
+        url = f"{SEARCH_URL}/{offset}"
+
+    params = {}
+    if keyword:
+        params["Busqueda"] = keyword
 
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        r = requests.get(SEARCH_URL, params=params, headers=headers, timeout=10)
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        print(f"  URL: {r.url}")
+        print(f"  Status: {r.status_code}")
         if r.status_code != 200:
             return []
-    except requests.RequestException:
+    except requests.RequestException as e:
+        print(f"  Request error: {e}")
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    jobs = []
-    cards = soup.select("div.card")
+    # Cada oferta tiene título en h2 > a, empresa/ciudad en h3
+    job_links = soup.select("h2 a[href*='/trabajo/']")
+    print(f"  Ofertas encontradas: {len(job_links)}")
 
     existing_urls = get_existing_urls()
+    jobs = []
 
-    for card in cards:
+    for link in job_links:
         try:
-            title_tag = card.select_one("h2 a")
-            if not title_tag:
+            title = link.get_text(strip=True)
+            job_url = BASE_URL + link["href"] if link["href"].startswith("/") else link["href"]
+
+            if job_url in existing_urls:
+                print(f"  [skip] {title}")
                 continue
 
-            title = title_tag.text.strip()
-            url = BASE_URL + title_tag["href"]
+            # La empresa y ciudad están en los h3 dentro del mismo contenedor padre
+            container = link.find_parent()
+            while container and container.name not in ("li", "div", "article", "section"):
+                container = container.find_parent()
 
-            # skip duplicados
-            if url in existing_urls:
-                continue
+            h3_tags = container.find_all("h3") if container else []
+            company_location = h3_tags[0].get_text(strip=True) if len(h3_tags) > 0 else ""
+            date = h3_tags[1].get_text(strip=True) if len(h3_tags) > 1 else ""
 
-            company = card.select_one(".empresa").text.strip() if card.select_one(".empresa") else ""
-            location = card.select_one(".lugar").text.strip() if card.select_one(".lugar") else ""
-            date = card.select_one(".fecha").text.strip() if card.select_one(".fecha") else ""
+            # Separar empresa y ciudad (vienen juntas: "Empresa, Ciudad")
+            if "," in company_location:
+                company, location = company_location.rsplit(",", 1)
+                company = company.strip()
+                location = location.strip()
+            else:
+                company = company_location
+                location = ""
 
-            # descripción (solo si es nuevo)
-            description = get_job_description(url)
+            description = get_job_description(job_url)
             time.sleep(1)
 
-            job = {
+            jobs.append({
                 "title": title,
                 "company": company,
                 "location": location,
                 "description": description,
-                "url": url,
+                "url": job_url,
                 "date": date,
                 "source": "chiletrabajos",
                 "created_at": datetime.utcnow().isoformat()
-            }
+            })
+            print(f"  [+] {title} — {company}")
 
-            jobs.append(job)
-
-        except Exception:
+        except Exception as e:
+            print(f"  Error en oferta: {e}")
             continue
 
     return jobs
@@ -150,17 +152,13 @@ def scrape_page(page=1, keyword="data"):
 
 def run_scraper(pages=2, keyword="data"):
     init_db()
-
     for page in range(1, pages + 1):
-        print(f"Scraping page {page}...")
+        print(f"\nScraping página {page}...")
         jobs = scrape_page(page, keyword)
-
         for job in jobs:
             save_job(job)
-
-        print(f"Saved {len(jobs)} new jobs")
-
-    print("Done.")
+        print(f"Guardados: {len(jobs)} nuevos jobs")
+    print("\nDone.")
 
 
 if __name__ == "__main__":

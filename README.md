@@ -3,5 +3,5 @@
 
 # Run
 ````
-python -m src.pipeline
+python3 -m src.pipeline
 ````
