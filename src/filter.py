@@ -10,7 +10,7 @@ def load_keywords():
         with open(KEYWORDS_PATH, "r") as f:
             return json.load(f)
     except Exception:
-        return {"positive": [], "negative": []}
+        return {"positive": [], "negative": [], "negative_phrases": []}
 
 
 def init_column():
@@ -27,30 +27,48 @@ def init_column():
     conn.close()
 
 
-def keyword_filter(text, positive, negative):
-    text = text.lower()
+def keyword_filter(text, positive, negative, negative_phrases):
+    """
+    Lógica de filtrado en tres pasos:
+    1. Rechaza si contiene alguna frase negativa exacta (multi-palabra).
+    2. Rechaza si contiene alguna palabra negativa como palabra completa (\bword\b).
+    3. Acepta si contiene al menos una keyword positiva.
+    """
+    import re
+    text_lower = text.lower()
 
-    if any(n in text for n in negative):
-        return 0
+    # Paso 1: frases negativas exactas (ej: "jefe de ventas", "call center")
+    for phrase in negative_phrases:
+        if phrase.lower() in text_lower:
+            return 0
 
-    if any(p in text for p in positive):
-        return 1
+    # Paso 2: palabras negativas como palabra completa para evitar falsos positivos
+    # "manager" no bloquea "data manager" — solo si aparece como cargo aislado
+    # Esto se controla moviendo términos ambiguos a negative_phrases en keywords.json
+    for word in negative:
+        if re.search(rf'\b{re.escape(word)}\b', text_lower):
+            return 0
+
+    # Paso 3: al menos una keyword positiva
+    for p in positive:
+        if p.lower() in text_lower:
+            return 1
 
     return 0
 
 
 def run_filter():
-    # init_column() ahora se llama automáticamente dentro de run_filter()
     init_column()
 
     keywords = load_keywords()
-    positive = keywords["positive"]
-    negative = keywords["negative"]
+    positive = keywords.get("positive", [])
+    negative = keywords.get("negative", [])
+    # negative_phrases: lista separada para coincidencias de frase exacta multi-palabra
+    negative_phrases = keywords.get("negative_phrases", [])
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # solo procesa jobs que nunca han sido evaluados (filtered IS NULL)
     rows = c.execute("""
         SELECT id, title, description 
         FROM jobs 
@@ -59,7 +77,7 @@ def run_filter():
 
     for job_id, title, desc in rows:
         text = f"{title} {desc or ''}"
-        result = keyword_filter(text, positive, negative)
+        result = keyword_filter(text, positive, negative, negative_phrases)
 
         c.execute(
             "UPDATE jobs SET filtered=? WHERE id=?",
