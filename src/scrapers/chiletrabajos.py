@@ -7,7 +7,10 @@ import time
 BASE_URL = "https://www.chiletrabajos.cl"
 SEARCH_URL = BASE_URL + "/encuentra-un-empleo"
 DB_PATH = "data/jobs.db"
-PAGE_SIZE = 30  # el sitio muestra 30 ofertas por página
+PAGE_SIZE = 30
+
+# Delay entre páginas para evitar rate limiting (segundos)
+PAGE_DELAY = 3
 
 
 def init_db():
@@ -68,21 +71,31 @@ def get_job_description(url):
     return desc.get_text(separator=" ", strip=True) if desc else ""
 
 
-def scrape_page(page=1, keyword="data", existing_urls=None):
-    # existing_urls se recibe como parámetro en vez de consultarse
-    # dentro del loop, evitando una query a DB por cada oferta
-    if existing_urls is None:
-        existing_urls = get_existing_urls()
+def build_page_url(page, keyword):
+    """
+    Construye la URL correcta para cada página.
 
-    offset = (page - 1) * PAGE_SIZE
-    if offset == 0:
-        url = SEARCH_URL
-    else:
-        url = f"{SEARCH_URL}/{offset}"
+    chiletrabajos usa query params para búsqueda y paginación:
+      Página 1: /encuentra-un-empleo?Busqueda=data
+      Página 2: /encuentra-un-empleo?Busqueda=data&pagina=2
+      Página N: /encuentra-un-empleo?Busqueda=data&pagina=N
 
+    Si el sitio cambia su esquema de paginación, solo hay que
+    actualizar esta función.
+    """
     params = {}
     if keyword:
         params["Busqueda"] = keyword
+    if page > 1:
+        params["pagina"] = page
+    return SEARCH_URL, params
+
+
+def scrape_page(page=1, keyword="data", existing_urls=None):
+    if existing_urls is None:
+        existing_urls = get_existing_urls()
+
+    url, params = build_page_url(page, keyword)
 
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -100,6 +113,11 @@ def scrape_page(page=1, keyword="data", existing_urls=None):
     job_links = soup.select("h2 a[href*='/trabajo/']")
     print(f"  Ofertas encontradas: {len(job_links)}")
 
+    # Si no hay resultados en esta página, detenemos el scraping anticipadamente
+    if not job_links:
+        print("  [info] Sin resultados — probablemente última página alcanzada.")
+        return None  # None indica "detener", [] indica "página vacía pero continuar"
+
     jobs = []
 
     for link in job_links:
@@ -111,7 +129,6 @@ def scrape_page(page=1, keyword="data", existing_urls=None):
                 print(f"  [skip] {title}")
                 continue
 
-            # si no se encuentra el contenedor, se loguea el título y se salta
             container = link.find_parent()
             while container and container.name not in ("li", "div", "article", "section"):
                 container = container.find_parent()
@@ -133,7 +150,6 @@ def scrape_page(page=1, keyword="data", existing_urls=None):
                 location = ""
 
             description = get_job_description(job_url)
-            # se agrega la URL al set local para evitar duplicados dentro del mismo run
             existing_urls.add(job_url)
             time.sleep(1)
 
@@ -158,16 +174,26 @@ def scrape_page(page=1, keyword="data", existing_urls=None):
 
 def run_scraper(pages=2, keyword="data"):
     init_db()
-    # existing_urls se consulta una sola vez antes del loop de páginas
-    # y se pasa como parámetro a cada scrape_page()
     existing_urls = get_existing_urls()
 
     for page in range(1, pages + 1):
         print(f"\nScraping página {page}...")
-        jobs = scrape_page(page, keyword, existing_urls)
-        for job in jobs:
+        result = scrape_page(page, keyword, existing_urls)
+
+        # None significa que no hubo resultados → se detiene el loop anticipadamente
+        if result is None:
+            print("No hay más páginas con resultados. Deteniendo scraper.")
+            break
+
+        for job in result:
             save_job(job)
-        print(f"Guardados: {len(jobs)} nuevos jobs")
+        print(f"Guardados: {len(result)} nuevos jobs")
+
+        # Delay entre páginas para evitar rate limiting
+        if page < pages:
+            print(f"  Esperando {PAGE_DELAY}s antes de la siguiente página...")
+            time.sleep(PAGE_DELAY)
+
     print("\nDone.")
 
 
