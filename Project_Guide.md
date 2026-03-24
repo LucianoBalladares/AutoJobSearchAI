@@ -7,7 +7,6 @@ Construir un sistema automatizado que permita:
 - Recolectar ofertas laborales relevantes
 - Filtrarlas inteligentemente
 - Priorizarlas según fit con el perfil
-- Generar postulaciones personalizadas
 - Optimizar el proceso de búsqueda de empleo
 
 Meta: Maximizar entrevistas en el menor tiempo posible.
@@ -18,12 +17,11 @@ Meta: Maximizar entrevistas en el menor tiempo posible.
 
 Pipeline:
 
-Job Scraper → Job Database → Filtering → AI Ranking → Application Generator → Output
+Job Scraper → Job Database → Filtering → AI Ranking → Output
 
 Salida diaria:
 
 - Lista priorizada de empleos
-- Borradores de postulación
 
 ---
 
@@ -96,7 +94,7 @@ Tabla: applications
 ### 3.3 Filtering (Pre-AI)
 
 Filtro por keywords:
-\*\*Keywords temporales, cambiaran a futuro
+_Keywords temporales, cambiaran a futuro_
 Positivas:
 
 - data
@@ -158,9 +156,6 @@ Contenido:
 ## 4. Automatización
 
 Uso de cron (Linux):
-
-0 8 \* \* \* python job_pipeline.py
-
 Ejecuta diariamente:
 
 - Scraping
@@ -193,6 +188,9 @@ Ejecuta diariamente:
 /src/scrapers
 
 - chiletrabajos.py
+- indeed.py
+- getonboard.py
+- linkedin.py
 
 /data
 
