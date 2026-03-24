@@ -1,13 +1,13 @@
 from src.scrapers.chiletrabajos import run_scraper
-from src.filter import run_filter, init_column as init_filter
-from src.ranker import run_ranker
+from src.filter import run_filter
+from src.ranker import run_ranker, init_column as init_ranker
 from src.output import run_output
 
 
 def run_pipeline():
     try:
         print("=== INIT ===")
-        init_filter()
+        init_ranker()
 
         print("=== SCRAPING ===")
         run_scraper(pages=2, keyword="data")
