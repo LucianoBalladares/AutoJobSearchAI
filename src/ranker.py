@@ -12,7 +12,6 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY not set")
 
-# modelo leído desde .env en vez de hardcoded
 model = os.getenv("OPENAI_MODEL")
 if not model:
     raise ValueError("OPENAI_MODEL not set in .env")
@@ -48,7 +47,7 @@ Evaluate this job for the following candidate:
 Job description:
 {description[:2000]}
 
-Return ONLY a number from 1 to 10.
+Return ONLY a single integer from 1 to 10. No explanation, no punctuation, just the number.
 """
 
     try:
@@ -60,16 +59,26 @@ Return ONLY a number from 1 to 10.
 
         text = response.choices[0].message.content.strip()
 
-        # parseo robusto — extrae el primer número del texto
-        match = re.search(r'\d+', text)
-        return int(match.group()) if match else None
+        # Extrae el primer número del texto
+        match = re.search(r'\b(\d{1,2})\b', text)
+        if not match:
+            return None
 
-    except Exception:
+        score = int(match.group(1))
+
+        # Valida que esté en rango 1–10
+        if not (1 <= score <= 10):
+            print(f"  [warn] Score fuera de rango: {score} — descartado")
+            return None
+
+        return score
+
+    except Exception as e:
+        print(f"  [error] score_job falló: {e}")
         return None
 
 
 def run_ranker(limit=20):
-    # init_column() ahora se llama automáticamente dentro de run_ranker()
     init_column()
 
     profile = load_profile()
@@ -97,6 +106,8 @@ def run_ranker(limit=20):
                 "UPDATE jobs SET score=? WHERE id=?",
                 (score, job_id)
             )
+        else:
+            print(f"  [skip] Job {job_id} sin score válido")
 
     conn.commit()
     conn.close()
