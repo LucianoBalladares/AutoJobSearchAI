@@ -1,5 +1,37 @@
-Medical Technologist
-Health Informatics training
-Experience with Power BI, SQL, Python
-Strong data analysis skills
-English C2
+Medical Technologist (BACIMET) with specialization in Health Informatics and Quality Management in Healthcare.
+
+Strong focus on data-driven decision making, healthcare analytics, and process optimization in clinical environments.
+
+Experience in:
+- Healthcare quality and accreditation (MINSAL standards, patient safety)
+- Clinical data analysis (Glosa 06, SIGTE)
+- Process auditing and optimization in hospitals
+- Supply chain and operational management in transfusion medicine units
+
+Technical skills:
+- Power BI (advanced dashboards for healthcare KPIs)
+- SQL (clinical databases: LIS/HIS)
+- Excel (advanced, macros, pivot tables)
+- Python (data analysis, automation)
+- Data analytics and health informatics
+
+Education:
+- Medical Technologist (Universidad Andrés Bello)
+- Diploma in Healthcare Quality Management
+- Health Informatics Specialization (Johns Hopkins)
+
+Certifications:
+- Machine Learning for Healthcare
+- Data Analytics (Microsoft / LinkedIn)
+- CS50 Harvard
+- Data Analysis with Python
+- AI & Generative AI (Microsoft)
+
+Languages:
+- English C2 (proficient)
+
+Key strengths:
+- Analytical thinking
+- Decision-making under pressure
+- Healthcare systems understanding
+- Data-driven strategy
