@@ -35,20 +35,23 @@
     "trainee data"
   ],
   "negative": [
-    "senior",
-    "lead",
-    "manager",
-    "ventas",
-    "sales",
-    "call center",
-    "telemarketing",
-    "sin experiencia",
-    "part time retail",
     "cajero",
     "operario",
     "conductor",
     "guardia",
-    "marketing puro",
-    "community manager"
+    "telemarketing"
+  ],
+  "negative_phrases": [
+    "jefe de ventas",
+    "gerente de ventas",
+    "ejecutivo de ventas",
+    "call center",
+    "atención telefónica",
+    "part time retail",
+    "community manager",
+    "marketing digital puro",
+    "sin experiencia requerida",
+    "vendedor puerta a puerta",
+    "promotor de ventas"
   ]
 }
