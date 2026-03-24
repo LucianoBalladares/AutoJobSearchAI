@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 import sqlite3
 from openai import OpenAI
 import os
+import re
 
 load_dotenv()
 DB_PATH = "data/jobs.db"
@@ -12,6 +13,7 @@ if not api_key:
     raise ValueError("OPENAI_API_KEY not set")
 
 client = OpenAI(api_key=api_key)
+
 
 def init_column():
     conn = sqlite3.connect(DB_PATH)
@@ -52,14 +54,19 @@ Return ONLY a number from 1 to 10.
         )
 
         text = response.choices[0].message.content.strip()
-        return int(text)
+
+        # parseo robusto — extrae el primer número del texto
+        match = re.search(r'\d+', text)
+        return int(match.group()) if match else None
 
     except Exception:
         return None
 
 
 def run_ranker(limit=20):
+    # init_column() ahora se llama automáticamente dentro de run_ranker()
     init_column()
+
     profile = load_profile()
 
     conn = sqlite3.connect(DB_PATH)
