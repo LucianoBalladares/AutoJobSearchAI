@@ -40,6 +40,9 @@ def keyword_filter(text, positive, negative):
 
 
 def run_filter():
+    # init_column() ahora se llama automáticamente dentro de run_filter()
+    init_column()
+
     keywords = load_keywords()
     positive = keywords["positive"]
     negative = keywords["negative"]
@@ -47,10 +50,11 @@ def run_filter():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
+    # solo procesa jobs que nunca han sido evaluados (filtered IS NULL)
     rows = c.execute("""
         SELECT id, title, description 
         FROM jobs 
-        WHERE filtered IS NULL OR filtered = 0
+        WHERE filtered IS NULL
     """).fetchall()
 
     for job_id, title, desc in rows:
@@ -69,5 +73,4 @@ def run_filter():
 
 
 if __name__ == "__main__":
-    init_column()
     run_filter()
