@@ -12,6 +12,11 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY not set")
 
+# modelo leído desde .env en vez de hardcoded
+model = os.getenv("OPENAI_MODEL")
+if not model:
+    raise ValueError("OPENAI_MODEL not set in .env")
+
 client = OpenAI(api_key=api_key)
 
 
@@ -48,7 +53,7 @@ Return ONLY a number from 1 to 10.
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
