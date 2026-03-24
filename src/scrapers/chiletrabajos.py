@@ -68,8 +68,12 @@ def get_job_description(url):
     return desc.get_text(separator=" ", strip=True) if desc else ""
 
 
-def scrape_page(page=1, keyword="data"):
-    # Paginación por offset: página 1 = /encuentra-un-empleo, página 2 = /encuentra-un-empleo/30, etc.
+def scrape_page(page=1, keyword="data", existing_urls=None):
+    # existing_urls se recibe como parámetro en vez de consultarse
+    # dentro del loop, evitando una query a DB por cada oferta
+    if existing_urls is None:
+        existing_urls = get_existing_urls()
+
     offset = (page - 1) * PAGE_SIZE
     if offset == 0:
         url = SEARCH_URL
@@ -93,12 +97,9 @@ def scrape_page(page=1, keyword="data"):
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")
-
-    # Cada oferta tiene título en h2 > a, empresa/ciudad en h3
     job_links = soup.select("h2 a[href*='/trabajo/']")
     print(f"  Ofertas encontradas: {len(job_links)}")
 
-    existing_urls = get_existing_urls()
     jobs = []
 
     for link in job_links:
@@ -110,16 +111,19 @@ def scrape_page(page=1, keyword="data"):
                 print(f"  [skip] {title}")
                 continue
 
-            # La empresa y ciudad están en los h3 dentro del mismo contenedor padre
+            # si no se encuentra el contenedor, se loguea el título y se salta
             container = link.find_parent()
             while container and container.name not in ("li", "div", "article", "section"):
                 container = container.find_parent()
 
-            h3_tags = container.find_all("h3") if container else []
+            if not container:
+                print(f"  [warn] No se encontró contenedor para: {title}")
+                continue
+
+            h3_tags = container.find_all("h3")
             company_location = h3_tags[0].get_text(strip=True) if len(h3_tags) > 0 else ""
             date = h3_tags[1].get_text(strip=True) if len(h3_tags) > 1 else ""
 
-            # Separar empresa y ciudad (vienen juntas: "Empresa, Ciudad")
             if "," in company_location:
                 company, location = company_location.rsplit(",", 1)
                 company = company.strip()
@@ -129,6 +133,8 @@ def scrape_page(page=1, keyword="data"):
                 location = ""
 
             description = get_job_description(job_url)
+            # se agrega la URL al set local para evitar duplicados dentro del mismo run
+            existing_urls.add(job_url)
             time.sleep(1)
 
             jobs.append({
@@ -152,9 +158,13 @@ def scrape_page(page=1, keyword="data"):
 
 def run_scraper(pages=2, keyword="data"):
     init_db()
+    # existing_urls se consulta una sola vez antes del loop de páginas
+    # y se pasa como parámetro a cada scrape_page()
+    existing_urls = get_existing_urls()
+
     for page in range(1, pages + 1):
         print(f"\nScraping página {page}...")
-        jobs = scrape_page(page, keyword)
+        jobs = scrape_page(page, keyword, existing_urls)
         for job in jobs:
             save_job(job)
         print(f"Guardados: {len(jobs)} nuevos jobs")
