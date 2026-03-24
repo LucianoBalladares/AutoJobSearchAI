@@ -10,6 +10,14 @@ def fetch_jobs(limit=10):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
+    # verificar que la columna score existe antes de hacer la query
+    c.execute("PRAGMA table_info(jobs)")
+    columns = [col[1] for col in c.fetchall()]
+    if "score" not in columns:
+        print("Warning: columna 'score' no existe aún. Corre el ranker primero.")
+        conn.close()
+        return []
+
     rows = c.execute("""
         SELECT title, company, location, url, score
         FROM jobs
@@ -27,6 +35,10 @@ def generate_markdown(jobs):
 
     today = datetime.now().strftime("%Y-%m-%d")
     lines.append(f"# Jobs - {today}\n")
+
+    if not jobs:
+        lines.append("_No hay jobs rankeados aún._")
+        return "\n".join(lines)
 
     for i, (title, company, location, url, score) in enumerate(jobs, 1):
         lines.append(f"## {i}. {title}")
