@@ -3,32 +3,55 @@ from bs4 import BeautifulSoup
 import sqlite3
 from datetime import datetime
 import time
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 BASE_URL = "https://www.chiletrabajos.cl"
 SEARCH_URL = BASE_URL + "/encuentra-un-empleo"
 DB_PATH = "data/jobs.db"
 PAGE_SIZE = 30
-
-# Delay entre páginas para evitar rate limiting (segundos)
 PAGE_DELAY = 3
 
 
 def init_db():
+    """
+    Crea la tabla jobs con TODAS las columnas en una sola operación.
+    Esto es la fuente de verdad del schema — ningún otro módulo
+    debe hacer ALTER TABLE para añadir columnas propias.
+    """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
     CREATE TABLE IF NOT EXISTS jobs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        company TEXT,
-        location TEXT,
-        description TEXT,
-        url TEXT UNIQUE,
-        date TEXT,
-        source TEXT,
-        created_at TEXT
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        title        TEXT,
+        company      TEXT,
+        location     TEXT,
+        description  TEXT,
+        url          TEXT UNIQUE,
+        date         TEXT,
+        source       TEXT,
+        created_at   TEXT,
+        filtered     INTEGER,
+        score        INTEGER,
+        delivered_at TEXT
     )
     """)
+    conn.commit()
+
+    # Migración segura: añade columnas faltantes si la tabla ya existía
+    # sin las columnas nuevas (bases de datos creadas con versiones anteriores).
+    c.execute("PRAGMA table_info(jobs)")
+    existing = {col[1] for col in c.fetchall()}
+    migrations = {
+        "filtered":     "ALTER TABLE jobs ADD COLUMN filtered INTEGER",
+        "score":        "ALTER TABLE jobs ADD COLUMN score INTEGER",
+        "delivered_at": "ALTER TABLE jobs ADD COLUMN delivered_at TEXT",
+    }
+    for col, sql in migrations.items():
+        if col not in existing:
+            c.execute(sql)
+            print(f"[migration] Columna '{col}' añadida.")
+
     conn.commit()
     conn.close()
 
@@ -58,31 +81,38 @@ def get_existing_urls():
     return set(r[0] for r in rows)
 
 
-def get_job_description(url):
+@retry(
+    retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    reraise=True,
+)
+def _fetch(url, params=None, headers=None):
+    """
+    GET con retry automático en errores de red y timeouts.
+    Reintentos: hasta 3 veces, con backoff exponencial (2s → 4s → 8s).
+    Solo reintenta en errores de conexión/timeout, no en errores HTTP (4xx/5xx).
+    """
+    return requests.get(url, params=params, headers=headers, timeout=10)
+
+
+def get_job_description(url: str) -> str:
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get(url, headers=headers, timeout=10)
+        r = _fetch(url, headers=headers)
         if r.status_code != 200:
+            print(f"  [warn] HTTP {r.status_code} en {url}")
             return ""
-    except requests.RequestException:
+    except requests.RequestException as e:
+        print(f"  [error] No se pudo obtener descripción ({url}): {e}")
         return ""
+
     soup = BeautifulSoup(r.text, "html.parser")
     desc = soup.select_one("#descripcion")
     return desc.get_text(separator=" ", strip=True) if desc else ""
 
 
 def build_page_url(page, keyword):
-    """
-    Construye la URL correcta para cada página.
-
-    chiletrabajos usa query params para búsqueda y paginación:
-      Página 1: /encuentra-un-empleo?Busqueda=data
-      Página 2: /encuentra-un-empleo?Busqueda=data&pagina=2
-      Página N: /encuentra-un-empleo?Busqueda=data&pagina=N
-
-    Si el sitio cambia su esquema de paginación, solo hay que
-    actualizar esta función.
-    """
     params = {}
     if keyword:
         params["Busqueda"] = keyword
@@ -96,27 +126,25 @@ def scrape_page(page=1, keyword="data", existing_urls=None):
         existing_urls = get_existing_urls()
 
     url, params = build_page_url(page, keyword)
-
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r = _fetch(url, params=params, headers=headers)
         print(f"  URL: {r.url}")
         print(f"  Status: {r.status_code}")
         if r.status_code != 200:
             return []
     except requests.RequestException as e:
-        print(f"  Request error: {e}")
+        print(f"  Request error (tras reintentos): {e}")
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")
     job_links = soup.select("h2 a[href*='/trabajo/']")
     print(f"  Ofertas encontradas: {len(job_links)}")
 
-    # Si no hay resultados en esta página, detenemos el scraping anticipadamente
     if not job_links:
         print("  [info] Sin resultados — probablemente última página alcanzada.")
-        return None  # None indica "detener", [] indica "página vacía pero continuar"
+        return None
 
     jobs = []
 
@@ -180,7 +208,6 @@ def run_scraper(pages=2, keyword="data"):
         print(f"\nScraping página {page}...")
         result = scrape_page(page, keyword, existing_urls)
 
-        # None significa que no hubo resultados → se detiene el loop anticipadamente
         if result is None:
             print("No hay más páginas con resultados. Deteniendo scraper.")
             break
@@ -189,7 +216,6 @@ def run_scraper(pages=2, keyword="data"):
             save_job(job)
         print(f"Guardados: {len(result)} nuevos jobs")
 
-        # Delay entre páginas para evitar rate limiting
         if page < pages:
             print(f"  Esperando {PAGE_DELAY}s antes de la siguiente página...")
             time.sleep(PAGE_DELAY)
