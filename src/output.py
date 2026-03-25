@@ -1,15 +1,15 @@
 import sqlite3
 from datetime import datetime
 import os
+import json
 
 DB_PATH = "data/jobs.db"
 OUTPUT_DIR = "output"
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "jobs_today.md")
 CONFIG_PATH = "config/output_config.json"
 
-# MIN_SCORE leído desde config; si no existe el archivo, usa 6 como default
+
 def load_min_score():
-    import json
     try:
         with open(CONFIG_PATH, "r") as f:
             return json.load(f).get("min_score", 6)
@@ -17,41 +17,24 @@ def load_min_score():
         return 6
 
 
-def init_column():
-    """Agrega la columna delivered_at si no existe."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute("PRAGMA table_info(jobs)")
-    columns = [col[1] for col in c.fetchall()]
-
-    if "delivered_at" not in columns:
-        c.execute("ALTER TABLE jobs ADD COLUMN delivered_at TEXT")
-        conn.commit()
-        print("Columna delivered_at creada.")
-
-    conn.close()
-
-
 def fetch_jobs(min_score):
     """
-    Retorna lista de jobs con score > min_score que aún no han sido entregados.
-    La conexión siempre se cierra antes de retornar.
+    Retorna jobs con score > min_score que aún no han sido entregados.
+    No hace ALTER TABLE — esa responsabilidad es de init_db() en el scraper.
     """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     try:
         c.execute("PRAGMA table_info(jobs)")
-        columns = [col[1] for col in c.fetchall()]
+        columns = {col[1] for col in c.fetchall()}
 
         if "score" not in columns:
-            print("Warning: columna 'score' no existe aún. Corre el ranker primero.")
+            print("Warning: columna 'score' no existe. Ejecuta el ranker primero.")
             return []
 
         if "delivered_at" not in columns:
-            c.execute("ALTER TABLE jobs ADD COLUMN delivered_at TEXT")
-            conn.commit()
+            print("Warning: columna 'delivered_at' no existe. Ejecuta init_db() primero.")
+            return []
 
         rows = c.execute("""
             SELECT id, title, company, location, url, score, date
@@ -63,27 +46,21 @@ def fetch_jobs(min_score):
         """, (min_score,)).fetchall()
 
         return list(rows)
-
     finally:
-        # La conexión siempre se cierra, sin importar si hubo error
         conn.close()
 
 
 def mark_as_delivered(job_ids):
-    """Marca los jobs entregados para no repetirlos en futuros outputs."""
     if not job_ids:
         return
-
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     now = datetime.utcnow().isoformat()
     placeholders = ",".join("?" * len(job_ids))
     c.execute(
         f"UPDATE jobs SET delivered_at = ? WHERE id IN ({placeholders})",
         [now] + list(job_ids)
     )
-
     conn.commit()
     conn.close()
     print(f"{len(job_ids)} jobs marcados como delivered.")
@@ -116,8 +93,6 @@ def generate_markdown(jobs, min_score):
 
 
 def run_output():
-    init_column()
-
     min_score = load_min_score()
     jobs = fetch_jobs(min_score)
 
