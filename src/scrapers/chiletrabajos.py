@@ -1,45 +1,44 @@
 import requests
 from bs4 import BeautifulSoup
-import sqlite3
 from datetime import datetime
 import time
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from src.db import init_db, DB_PATH
+from src.db import init_db, get_connection
 
 BASE_URL = "https://www.chiletrabajos.cl"
 SEARCH_URL = BASE_URL + "/encuentra-un-empleo"
-PAGE_SIZE = 30
 PAGE_DELAY = 3
 
 
 def save_job(job):
-    # Valida campos obligatorios antes de insertar
     if not job.get("title") or not job.get("url"):
         print(f"  [skip] Oferta sin título o URL, descartada.")
         return
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    try:
-        c.execute("""
-        INSERT INTO jobs (title, company, location, description, url, date, source, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            job["title"], job["company"], job["location"], job["description"],
-            job["url"], job["date"], job["source"], job["created_at"]
-        ))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        pass
-    conn.close()
+    # Usa get_connection() como fuente única de conexiones a la DB.
+    # El try/finally garantiza que la conexión se cierra aunque falle el INSERT.
+    with get_connection() as conn:
+        c = conn.cursor()
+        try:
+            c.execute("""
+            INSERT INTO jobs (title, company, location, description, url, date, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                job["title"], job["company"], job["location"], job["description"],
+                job["url"], job["date"], job["source"], job["created_at"]
+            ))
+            conn.commit()
+        except Exception:
+            # IntegrityError por URL duplicada: silencioso (comportamiento esperado).
+            # Cualquier otro error se deja pasar para no interrumpir el loop.
+            pass
 
 
 def get_existing_urls():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    rows = c.execute("SELECT url FROM jobs").fetchall()
-    conn.close()
+    with get_connection() as conn:
+        c = conn.cursor()
+        rows = c.execute("SELECT url FROM jobs").fetchall()
     return set(r[0] for r in rows)
 
 
@@ -51,9 +50,8 @@ def get_existing_urls():
 )
 def _fetch(url, params=None, headers=None):
     """
-    GET con retry automático en errores de red y timeouts.
-    Reintentos: hasta 3 veces, con backoff exponencial (2s → 4s → 8s).
-    Solo reintenta en errores de conexión/timeout, no en errores HTTP (4xx/5xx).
+    GET con retry automático solo en errores de red y timeouts.
+    Errores HTTP (4xx/5xx) no se reintentan — necesitan intervención manual.
     """
     return requests.get(url, params=params, headers=headers, timeout=10)
 
@@ -164,10 +162,9 @@ def scrape_page(page=1, keyword="data", existing_urls=None):
 
 def run_scraper(pages=2, keywords=None):
     """
-    Ejecuta el scraper para una lista de keywords.
-    Si no se pasan keywords, usa ["data"] como fallback.
-    Deduplica automáticamente — una URL ya vista no se vuelve a procesar
-    aunque aparezca en múltiples búsquedas de keywords distintas.
+    Implementa la interfaz estándar de scrapers: run_scraper(pages, keywords).
+    Todos los scrapers del proyecto deben exportar esta misma firma para que
+    pipeline.py pueda cargarlos dinámicamente sin imports hardcodeados.
     """
     if keywords is None:
         keywords = ["data"]
