@@ -20,8 +20,16 @@ DESCRIPTION_MAX_CHARS = 2000
 # Modelos de OpenAI soportados. Si el valor en .env no está en esta lista
 # se lanza un error claro en lugar de un fallo críptico de la API.
 KNOWN_OPENAI_MODELS = {
+    # Nueva generación 
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-turbo",
+
+    # Generación anterior 
     "gpt-4o",
     "gpt-4o-mini",
+
+    # Compatibilidad legacy (pueden deprecarse)
     "gpt-4-turbo",
     "gpt-4",
     "gpt-3.5-turbo",
