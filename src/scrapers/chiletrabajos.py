@@ -5,58 +5,20 @@ from datetime import datetime
 import time
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from src.db import init_db, DB_PATH
+
 BASE_URL = "https://www.chiletrabajos.cl"
 SEARCH_URL = BASE_URL + "/encuentra-un-empleo"
-DB_PATH = "data/jobs.db"
 PAGE_SIZE = 30
 PAGE_DELAY = 3
 
 
-def init_db():
-    """
-    Crea la tabla jobs con TODAS las columnas en una sola operación.
-    Esto es la fuente de verdad del schema — ningún otro módulo
-    debe hacer ALTER TABLE para añadir columnas propias.
-    """
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS jobs (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        title        TEXT,
-        company      TEXT,
-        location     TEXT,
-        description  TEXT,
-        url          TEXT UNIQUE,
-        date         TEXT,
-        source       TEXT,
-        created_at   TEXT,
-        filtered     INTEGER,
-        score        INTEGER,
-        delivered_at TEXT
-    )
-    """)
-    conn.commit()
-
-    # Migración segura: añade columnas faltantes si la tabla ya existía
-    # sin las columnas nuevas (bases de datos creadas con versiones anteriores).
-    c.execute("PRAGMA table_info(jobs)")
-    existing = {col[1] for col in c.fetchall()}
-    migrations = {
-        "filtered":     "ALTER TABLE jobs ADD COLUMN filtered INTEGER",
-        "score":        "ALTER TABLE jobs ADD COLUMN score INTEGER",
-        "delivered_at": "ALTER TABLE jobs ADD COLUMN delivered_at TEXT",
-    }
-    for col, sql in migrations.items():
-        if col not in existing:
-            c.execute(sql)
-            print(f"[migration] Columna '{col}' añadida.")
-
-    conn.commit()
-    conn.close()
-
-
 def save_job(job):
+    # Valida campos obligatorios antes de insertar
+    if not job.get("title") or not job.get("url"):
+        print(f"  [skip] Oferta sin título o URL, descartada.")
+        return
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
@@ -200,28 +162,39 @@ def scrape_page(page=1, keyword="data", existing_urls=None):
     return jobs
 
 
-def run_scraper(pages=2, keyword="data"):
+def run_scraper(pages=2, keywords=None):
+    """
+    Ejecuta el scraper para una lista de keywords.
+    Si no se pasan keywords, usa ["data"] como fallback.
+    Deduplica automáticamente — una URL ya vista no se vuelve a procesar
+    aunque aparezca en múltiples búsquedas de keywords distintas.
+    """
+    if keywords is None:
+        keywords = ["data"]
+
     init_db()
     existing_urls = get_existing_urls()
 
-    for page in range(1, pages + 1):
-        print(f"\nScraping página {page}...")
-        result = scrape_page(page, keyword, existing_urls)
+    for keyword in keywords:
+        print(f"\n=== Keyword: '{keyword}' ===")
+        for page in range(1, pages + 1):
+            print(f"\nScraping página {page}...")
+            result = scrape_page(page, keyword, existing_urls)
 
-        if result is None:
-            print("No hay más páginas con resultados. Deteniendo scraper.")
-            break
+            if result is None:
+                print("No hay más páginas con resultados. Siguiente keyword.")
+                break
 
-        for job in result:
-            save_job(job)
-        print(f"Guardados: {len(result)} nuevos jobs")
+            for job in result:
+                save_job(job)
+            print(f"Guardados: {len(result)} nuevos jobs")
 
-        if page < pages:
-            print(f"  Esperando {PAGE_DELAY}s antes de la siguiente página...")
-            time.sleep(PAGE_DELAY)
+            if page < pages:
+                print(f"  Esperando {PAGE_DELAY}s antes de la siguiente página...")
+                time.sleep(PAGE_DELAY)
 
     print("\nDone.")
 
 
 if __name__ == "__main__":
-    run_scraper(pages=2, keyword="data")
+    run_scraper(pages=2, keywords=["data", "salud", "analista"])
