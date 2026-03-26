@@ -3,7 +3,8 @@ import json
 import re
 import unicodedata
 
-DB_PATH = "data/jobs.db"
+from src.db import DB_PATH
+
 KEYWORDS_PATH = "config/keywords.json"
 
 
@@ -17,21 +18,32 @@ def normalize(text: str) -> str:
     pero el keyword está como "analisis" (o viceversa).
     """
     text = text.lower()
-    # NFD descompone caracteres acentuados en base + diacrítico
-    # category Mn = Mark, Nonspacing (los diacríticos)
     text = unicodedata.normalize("NFD", text)
     text = "".join(c for c in text if unicodedata.category(c) != "Mn")
     return text
 
 
 def load_keywords():
+    """
+    Carga y pre-normaliza keywords desde el JSON de configuración.
+    Lanza una excepción explícita si el archivo no existe o tiene
+    sintaxis inválida, en lugar de retornar listas vacías silenciosamente
+    (lo que haría que todos los jobs pasen como rechazados sin aviso).
+    """
     try:
         with open(KEYWORDS_PATH, "r", encoding="utf-8") as f:
             raw = json.load(f)
-    except Exception:
-        return {"positive": [], "negative": [], "negative_phrases": []}
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Archivo de keywords no encontrado: {KEYWORDS_PATH}. "
+            "Asegúrate de que el archivo existe antes de correr el filtro."
+        )
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Error de sintaxis en {KEYWORDS_PATH}: {e}. "
+            "Verifica que el JSON sea válido antes de continuar."
+        )
 
-    # Pre-normaliza todas las listas para no repetir el trabajo en cada oferta
     return {
         "positive":          [normalize(k) for k in raw.get("positive", [])],
         "negative":          [normalize(k) for k in raw.get("negative", [])],
@@ -45,24 +57,18 @@ def keyword_filter(text: str, positive: list, negative: list, negative_phrases: 
 
     1. Rechaza si contiene alguna frase negativa exacta (multi-palabra).
     2. Rechaza si contiene alguna palabra negativa como palabra completa (\\bword\\b).
-       — Mismo criterio que positivas: evita falsos positivos por substrings.
     3. Acepta si contiene al menos una keyword positiva como palabra completa.
-       — Antes usaba `in` (substring), ahora usa \\b para consistencia.
-         Ej: "pastoral" ya no matchea "sql"; "data" sí matchea "data analyst".
     """
     t = normalize(text)
 
-    # Paso 1: frases negativas exactas (substring match es correcto aquí)
     for phrase in negative_phrases:
         if phrase in t:
             return 0
 
-    # Paso 2: palabras negativas — word boundary para evitar falsos positivos
     for word in negative:
         if re.search(rf"\b{re.escape(word)}\b", t):
             return 0
 
-    # Paso 3: al menos una keyword positiva — word boundary para consistencia
     for p in positive:
         if re.search(rf"\b{re.escape(p)}\b", t):
             return 1
