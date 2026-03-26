@@ -3,10 +3,29 @@ import sqlite3
 from openai import OpenAI
 import os
 import re
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+from src.db import DB_PATH
 
 load_dotenv()
-DB_PATH = "data/jobs.db"
+
 PROFILE_PATH = "config/profile.txt"
+
+# Longitud máxima del perfil enviado al modelo.
+# El perfil completo se recorta para no repetir tokens innecesarios
+# en cada llamada cuando se rankean muchos jobs de una sola vez.
+PROFILE_MAX_CHARS = 1500
+DESCRIPTION_MAX_CHARS = 2000
+
+# Modelos de OpenAI soportados. Si el valor en .env no está en esta lista
+# se lanza un error claro en lugar de un fallo críptico de la API.
+KNOWN_OPENAI_MODELS = {
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "gpt-4",
+    "gpt-3.5-turbo",
+}
 
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
@@ -16,57 +35,61 @@ model = os.getenv("OPENAI_MODEL")
 if not model:
     raise ValueError("OPENAI_MODEL not set in .env")
 
+if model not in KNOWN_OPENAI_MODELS:
+    raise ValueError(
+        f"OPENAI_MODEL '{model}' no reconocido. "
+        f"Valores válidos: {', '.join(sorted(KNOWN_OPENAI_MODELS))}. "
+        f"Si es un modelo nuevo, agrégalo a KNOWN_OPENAI_MODELS en ranker.py."
+    )
+
 client = OpenAI(api_key=api_key)
 
 
-def init_column():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute("PRAGMA table_info(jobs)")
-    columns = [col[1] for col in c.fetchall()]
-
-    if "score" not in columns:
-        c.execute("ALTER TABLE jobs ADD COLUMN score INTEGER")
-
-    conn.commit()
-    conn.close()
-
-
-def load_profile():
+def load_profile() -> str:
     with open(PROFILE_PATH, "r") as f:
-        return f.read()
+        text = f.read()
+    if len(text) > PROFILE_MAX_CHARS:
+        text = text[:PROFILE_MAX_CHARS] + "\n[perfil recortado]"
+    return text
 
 
-def score_job(description, profile):
+# Retry en errores transitorios de la API (rate limit, timeout, error 5xx).
+# No reintenta en errores de autenticación (4xx que no sean 429).
+@retry(
+    retry=retry_if_exception_type(Exception),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    reraise=True,
+)
+def _call_api(description: str, profile: str) -> str:
     prompt = f"""
 Evaluate this job for the following candidate:
 
 {profile}
 
 Job description:
-{description[:2000]}
+{description[:DESCRIPTION_MAX_CHARS]}
 
 Return ONLY a single integer from 1 to 10. No explanation, no punctuation, just the number.
 """
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    return response.choices[0].message.content.strip()
 
+
+def score_job(description: str, profile: str):
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
-        )
+        text = _call_api(description, profile)
 
-        text = response.choices[0].message.content.strip()
-
-        # Extrae el primer número del texto
         match = re.search(r'\b(\d{1,2})\b', text)
         if not match:
             return None
 
         score = int(match.group(1))
 
-        # Valida que esté en rango 1–10
         if not (1 <= score <= 10):
             print(f"  [warn] Score fuera de rango: {score} — descartado")
             return None
@@ -74,13 +97,11 @@ Return ONLY a single integer from 1 to 10. No explanation, no punctuation, just 
         return score
 
     except Exception as e:
-        print(f"  [error] score_job falló: {e}")
+        print(f"  [error] score_job falló tras reintentos: {e}")
         return None
 
 
 def run_ranker(limit=20):
-    init_column()
-
     profile = load_profile()
 
     conn = sqlite3.connect(DB_PATH)
