@@ -2,34 +2,33 @@
 Pipeline principal del sistema AutoJobSearchAI.
 
 Cambios respecto a la versión anterior:
-- El scraper ahora recibe una lista de keywords en lugar de una sola.
-  Se define SCRAPE_KEYWORDS aquí como fuente de verdad para la búsqueda.
-- El first run tiene protección contra repetición: se marca con una etapa
-  "first_run_complete" en state.json. Si el pipeline se interrumpe antes
-  de guardar last_run, el siguiente run no vuelve a descargar 25 páginas.
-- init_ranker() eliminado — el schema ahora vive en src/db.py y se
-  inicializa una sola vez al comienzo del pipeline.
+- Lock de proceso basado en PID: si el proceso muere con SIGKILL, el siguiente
+  run detecta que el PID en el lockfile ya no existe y toma el lock de forma
+  segura, en lugar de quedar bloqueado para siempre.
+- Scrapers se cargan dinámicamente desde src/scrapers/ mediante load_scrapers().
+  Para agregar una nueva fuente basta crear el archivo; no hay que tocar pipeline.py.
+- fcntl solo se importa en Unix. En Windows se usa un fallback sin locking
+  (suficiente para uso personal en un solo proceso).
 """
 
 from src.db import init_db
-from src.scrapers.chiletrabajos import run_scraper
+from src.scrapers import load_scrapers
 from src.filter import run_filter
 from src.ranker import run_ranker
 from src.output import run_output
 import sqlite3
 import json
 import os
-import fcntl
+import sys
 from datetime import datetime, timedelta
 
 STATE_PATH = "config/state.json"
+LOCK_PATH = STATE_PATH + ".lock"
 DB_PATH = "data/jobs.db"
 
 FIRST_RUN_PAGES = 25
 DAILY_RUN_PAGES = 2
 
-# Keywords que se usan en cada pasada de scraping.
-# Agregar aquí nuevos términos de búsqueda — no hace falta tocar el scraper.
 SCRAPE_KEYWORDS = [
     "data",
     "analista",
@@ -38,59 +37,113 @@ SCRAPE_KEYWORDS = [
     "informática",
 ]
 
+# ---------------------------------------------------------------------------
+# Detección de plataforma para file locking
+# ---------------------------------------------------------------------------
+
+if sys.platform != "win32":
+    import fcntl
+    _FCNTL_AVAILABLE = True
+else:
+    _FCNTL_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
-# State management con file lock
+# Lock de proceso basado en PID
+# ---------------------------------------------------------------------------
+
+def acquire_pipeline_lock() -> None:
+    """
+    Implementa un lockfile basado en PID que sobrevive a reinicios abruptos.
+
+    Flujo:
+    1. Si no existe el lockfile → crear con PID actual, continuar.
+    2. Si existe → leer el PID guardado.
+       a. Si ese PID sigue activo → otro proceso está corriendo, abortar.
+       b. Si ese PID no existe → proceso anterior murió (SIGKILL, crash),
+          el lock es huérfano: sobreescribir con PID actual y continuar.
+
+    En Windows no hay os.kill(pid, 0) con la misma semántica, así que
+    simplemente omitimos el locking (uso personal, un solo proceso).
+    """
+    if not _FCNTL_AVAILABLE:
+        _write_lockfile()
+        return
+
+    if os.path.exists(LOCK_PATH):
+        try:
+            with open(LOCK_PATH, "r") as f:
+                existing_pid = int(f.read().strip())
+        except (ValueError, OSError):
+            existing_pid = None
+
+        if existing_pid and _pid_is_running(existing_pid):
+            raise RuntimeError(
+                f"El pipeline ya está corriendo (PID {existing_pid}). "
+                "Revisa tus cron jobs o procesos activos."
+            )
+        else:
+            print(f"[lock] Lock huérfano encontrado (PID {existing_pid} ya no existe). Tomando el lock.")
+
+    _write_lockfile()
+
+
+def _write_lockfile() -> None:
+    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    with open(LOCK_PATH, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def release_pipeline_lock() -> None:
+    """Elimina el lockfile al terminar el pipeline (normal o por excepción)."""
+    try:
+        os.remove(LOCK_PATH)
+    except FileNotFoundError:
+        pass
+
+
+def _pid_is_running(pid: int) -> bool:
+    """
+    Comprueba si un PID está activo enviando señal 0 (no mata el proceso,
+    solo verifica existencia). Retorna False si el proceso no existe o
+    pertenece a otro usuario (PermissionError = el proceso sí existe).
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # El proceso existe pero no tenemos permiso para señalizarlo.
+        # Tratarlo como activo para no robar el lock.
+        return True
+
+
+# ---------------------------------------------------------------------------
+# State management
 # ---------------------------------------------------------------------------
 
 def load_state() -> dict:
     if not os.path.exists(STATE_PATH):
         return {"last_run": None, "stages": {}}
-
     with open(STATE_PATH, "r") as f:
-        fcntl.flock(f, fcntl.LOCK_SH)
-        try:
-            data = json.load(f)
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-
+        data = json.load(f)
     if "stages" not in data:
         data["stages"] = {}
     return data
 
 
-def save_state(state: dict):
+def save_state(state: dict) -> None:
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
     tmp_path = STATE_PATH + ".tmp"
-
     with open(tmp_path, "w") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            json.dump(state, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-
+        json.dump(state, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp_path, STATE_PATH)
 
 
-def acquire_pipeline_lock():
-    lock_path = STATE_PATH + ".lock"
-    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-    fd = open(lock_path, "w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        fd.close()
-        raise RuntimeError(
-            "El pipeline ya está corriendo en otra instancia. "
-            "Revisa tus cron jobs o procesos activos."
-        )
-    return fd
-
-
-def mark_stage(state: dict, stage: str, status: str = "ok", error=None):
+def mark_stage(state: dict, stage: str, status: str = "ok", error=None) -> None:
     state["stages"][stage] = {
         "status": status,
         "timestamp": datetime.utcnow().isoformat(),
@@ -100,12 +153,6 @@ def mark_stage(state: dict, stage: str, status: str = "ok", error=None):
 
 
 def is_first_run(state: dict) -> bool:
-    """
-    Se considera first run si nunca se completó exitosamente uno anterior.
-    Usa la etapa 'first_run_complete' como bandera explícita, separada de
-    last_run — así, si el pipeline se interrumpe antes de guardar last_run,
-    el siguiente intento no repite las 25 páginas innecesariamente.
-    """
     return state["stages"].get("first_run_complete", {}).get("status") != "ok"
 
 
@@ -113,10 +160,7 @@ def is_first_run(state: dict) -> bool:
 # Cleanup
 # ---------------------------------------------------------------------------
 
-def run_cleanup(days: int = 7):
-    """
-    Elimina jobs entregados (delivered_at IS NOT NULL) hace más de `days` días.
-    """
+def run_cleanup(days: int = 7) -> None:
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
@@ -142,14 +186,9 @@ def run_cleanup(days: int = 7):
         print("Cleanup: nada que eliminar.")
 
 
-def run_cleanup_rejected(days: int = 30):
-    """
-    Limpieza opcional de jobs rechazados por el filtro o sin rankear.
-    Llamar manualmente cuando la DB crezca demasiado.
-    """
+def run_cleanup_rejected(days: int = 30) -> None:
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
     result = c.execute(
         """DELETE FROM jobs
@@ -167,16 +206,15 @@ def run_cleanup_rejected(days: int = 30):
 # Pipeline principal
 # ---------------------------------------------------------------------------
 
-def run_pipeline():
-    lock_fd = acquire_pipeline_lock()
+def run_pipeline() -> None:
+    acquire_pipeline_lock()
     try:
         _run_pipeline_inner()
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
+        release_pipeline_lock()
 
 
-def _run_pipeline_inner():
+def _run_pipeline_inner() -> None:
     state = load_state()
     first_run = is_first_run(state)
 
@@ -191,12 +229,16 @@ def _run_pipeline_inner():
         print(f"Modo: DAILY RUN — revisando {pages} páginas por keyword (~últimas 24h)")
         print(f"Último run completo: {state['last_run']}")
 
+    # Descarga dinámica de scrapers: no es necesario tocar este archivo
+    # al agregar una nueva fuente.
+    scrapers = load_scrapers()
+    if not scrapers:
+        raise RuntimeError(
+            "No se encontró ningún scraper en src/scrapers/. "
+            "Verifica que los archivos exporten run_scraper(pages, keywords)."
+        )
+    print(f"Scrapers activos: {list(scrapers.keys())}")
     print(f"Keywords: {SCRAPE_KEYWORDS}")
-
-    if state["stages"]:
-        print("Estado etapas previas:")
-        for stage, info in state["stages"].items():
-            print(f"  {stage}: {info['status']} @ {info['timestamp']}")
 
     print("\n=== CLEANUP ===")
     try:
@@ -208,7 +250,9 @@ def _run_pipeline_inner():
 
     print("\n=== SCRAPING ===")
     try:
-        run_scraper(pages=pages, keywords=SCRAPE_KEYWORDS)
+        for name, run_scraper in scrapers.items():
+            print(f"\n--- Scraper: {name} ---")
+            run_scraper(pages=pages, keywords=SCRAPE_KEYWORDS)
         mark_stage(state, "scraping")
     except Exception as e:
         mark_stage(state, "scraping", status="error", error=str(e))
@@ -238,9 +282,6 @@ def _run_pipeline_inner():
         mark_stage(state, "output", status="error", error=str(e))
         raise
 
-    # Marca el first run como completado ANTES de actualizar last_run.
-    # Si este bloque se interrumpe entre estas dos líneas (muy improbable),
-    # el peor caso es repetir el daily run, no el first run de 25 páginas.
     if first_run:
         mark_stage(state, "first_run_complete")
 
