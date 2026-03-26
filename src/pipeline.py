@@ -9,6 +9,8 @@ Cambios respecto a la versión anterior:
   Para agregar una nueva fuente basta crear el archivo; no hay que tocar pipeline.py.
 - fcntl solo se importa en Unix. En Windows se usa un fallback sin locking
   (suficiente para uso personal en un solo proceso).
+- run_cleanup_rejected() se invoca en el bloque de cleanup para que jobs
+  rechazados o sin score no se acumulen indefinidamente en la DB.
 """
 
 from src.db import init_db
@@ -23,8 +25,8 @@ import sys
 from datetime import datetime, timedelta
 
 STATE_PATH = "config/state.json"
-LOCK_PATH = STATE_PATH + ".lock"
-DB_PATH = "data/jobs.db"
+LOCK_PATH  = STATE_PATH + ".lock"
+DB_PATH    = "data/jobs.db"
 
 FIRST_RUN_PAGES = 25
 DAILY_RUN_PAGES = 2
@@ -62,9 +64,6 @@ def acquire_pipeline_lock() -> None:
        a. Si ese PID sigue activo → otro proceso está corriendo, abortar.
        b. Si ese PID no existe → proceso anterior murió (SIGKILL, crash),
           el lock es huérfano: sobreescribir con PID actual y continuar.
-
-    En Windows no hay os.kill(pid, 0) con la misma semántica, así que
-    simplemente omitimos el locking (uso personal, un solo proceso).
     """
     if not _FCNTL_AVAILABLE:
         _write_lockfile()
@@ -104,9 +103,8 @@ def release_pipeline_lock() -> None:
 
 def _pid_is_running(pid: int) -> bool:
     """
-    Comprueba si un PID está activo enviando señal 0 (no mata el proceso,
-    solo verifica existencia). Retorna False si el proceso no existe o
-    pertenece a otro usuario (PermissionError = el proceso sí existe).
+    Comprueba si un PID está activo enviando señal 0.
+    PermissionError = el proceso existe pero pertenece a otro usuario → activo.
     """
     try:
         os.kill(pid, 0)
@@ -114,8 +112,6 @@ def _pid_is_running(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        # El proceso existe pero no tenemos permiso para señalizarlo.
-        # Tratarlo como activo para no robar el lock.
         return True
 
 
@@ -161,6 +157,7 @@ def is_first_run(state: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def run_cleanup(days: int = 7) -> None:
+    """Elimina jobs entregados hace más de `days` días."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
@@ -187,6 +184,13 @@ def run_cleanup(days: int = 7) -> None:
 
 
 def run_cleanup_rejected(days: int = 30) -> None:
+    """
+    Elimina jobs rechazados por el filtro (filtered=0) o que nunca recibieron
+    score (filtered=1 pero score IS NULL), creados hace más de `days` días.
+
+    Sin esta limpieza los jobs descartados se acumulan indefinidamente,
+    ya que nunca pasan por output.py y por lo tanto nunca reciben delivered_at.
+    """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
@@ -199,7 +203,11 @@ def run_cleanup_rejected(days: int = 30) -> None:
     deleted = result.rowcount
     conn.commit()
     conn.close()
-    print(f"Cleanup rejected: {deleted} jobs eliminados (>{days} días).")
+
+    if deleted > 0:
+        print(f"Cleanup rejected: {deleted} jobs eliminados (>{days} días).")
+    else:
+        print("Cleanup rejected: nada que eliminar.")
 
 
 # ---------------------------------------------------------------------------
@@ -229,8 +237,6 @@ def _run_pipeline_inner() -> None:
         print(f"Modo: DAILY RUN — revisando {pages} páginas por keyword (~últimas 24h)")
         print(f"Último run completo: {state['last_run']}")
 
-    # Descarga dinámica de scrapers: no es necesario tocar este archivo
-    # al agregar una nueva fuente.
     scrapers = load_scrapers()
     if not scrapers:
         raise RuntimeError(
@@ -240,9 +246,14 @@ def _run_pipeline_inner() -> None:
     print(f"Scrapers activos: {list(scrapers.keys())}")
     print(f"Keywords: {SCRAPE_KEYWORDS}")
 
+    # -------------------------------------------------------------------
+    # Cleanup
+    # Ejecuta ambas funciones: jobs entregados (7d) y jobs descartados (30d).
+    # -------------------------------------------------------------------
     print("\n=== CLEANUP ===")
     try:
         run_cleanup(days=7)
+        run_cleanup_rejected(days=30)   # <-- antes no se llamaba
         mark_stage(state, "cleanup")
     except Exception as e:
         mark_stage(state, "cleanup", status="error", error=str(e))
