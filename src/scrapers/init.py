@@ -1,16 +1,22 @@
 """
-Interfaz estándar para scrapers de AutoJobSearchAI.
+Paquete de scrapers para AutoJobSearchAI.
 
-Convención: cada scraper en este directorio debe exportar una función
-con la siguiente firma exacta:
+Este archivo cumple dos roles:
+1. Declara src/scrapers/ como paquete Python.
+2. Expone load_scrapers() como símbolo público del paquete, de modo que
+   `from src.scrapers import load_scrapers` funcione sin importar el
+   módulo interno por nombre.
+
+Convención para scrapers nuevos
+--------------------------------
+Cada archivo en este directorio debe exportar una función con esta firma:
 
     def run_scraper(pages: int, keywords: list[str]) -> None
 
-pipeline.py usa load_scrapers() para descubrir y ejecutar todos los
-scrapers disponibles sin necesidad de imports hardcodeados. Para agregar
-un scraper nuevo basta con crear el archivo y seguir la convención.
+load_scrapers() la descubre automáticamente. No es necesario tocar
+pipeline.py ni este archivo al agregar una nueva fuente.
 
-Ejemplo de scraper mínimo (src/scrapers/mi_fuente.py):
+Ejemplo mínimo (src/scrapers/mi_fuente.py):
 
     from src.db import init_db, get_connection
     from datetime import datetime
@@ -34,9 +40,12 @@ def load_scrapers() -> dict[str, Callable]:
     run_scraper(). Retorna un dict {nombre: función}.
 
     Si un módulo falla al importar (dependencia faltante, error de sintaxis),
-    se logea el error y se omite ese scraper sin interrumpir los demás.
+    se loguea el error y se omite ese scraper sin interrumpir los demás.
+
+    Este símbolo se exporta explícitamente desde el paquete para que
+    `from src.scrapers import load_scrapers` funcione de forma directa.
     """
-    scrapers = {}
+    scrapers: dict[str, Callable] = {}
     package_path = Path(__file__).parent
     package_name = __name__  # "src.scrapers"
 
@@ -54,3 +63,9 @@ def load_scrapers() -> dict[str, Callable]:
             print(f"[scrapers] {module_name} no exporta run_scraper(), ignorado.")
 
     return scrapers
+
+
+# Exportación explícita del símbolo público de este paquete.
+# Cualquier import del estilo `from src.scrapers import load_scrapers`
+# resuelve aquí sin necesidad de conocer el módulo interno.
+__all__ = ["load_scrapers"]
