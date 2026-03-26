@@ -3,7 +3,8 @@ from datetime import datetime
 import os
 import json
 
-DB_PATH = "data/jobs.db"
+from src.db import DB_PATH
+
 OUTPUT_DIR = "output"
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "jobs_today.md")
 CONFIG_PATH = "config/output_config.json"
@@ -19,8 +20,7 @@ def load_min_score():
 
 def fetch_jobs(min_score):
     """
-    Retorna jobs con score > min_score que aún no han sido entregados.
-    No hace ALTER TABLE — esa responsabilidad es de init_db() en el scraper.
+    Retorna jobs con score >= min_score que aún no han sido entregados.
     """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -40,12 +40,35 @@ def fetch_jobs(min_score):
             SELECT id, title, company, location, url, score, date
             FROM jobs
             WHERE filtered = 1
-              AND score > ?
+              AND score >= ?
               AND delivered_at IS NULL
             ORDER BY score DESC
         """, (min_score,)).fetchall()
 
         return list(rows)
+    finally:
+        conn.close()
+
+
+def fetch_all_ranked_undelivered():
+    """
+    Retorna IDs de todos los jobs que ya fueron rankeados pero aún no
+    marcados como delivered, independientemente de su score.
+
+    Esto garantiza que jobs con score bajo no queden huérfanos en la DB
+    indefinidamente: se marcan como delivered aunque no aparezcan en el output,
+    lo que permite que el cleanup de 7 días los elimine correctamente.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        rows = c.execute("""
+            SELECT id FROM jobs
+            WHERE filtered = 1
+              AND score IS NOT NULL
+              AND delivered_at IS NULL
+        """).fetchall()
+        return [r[0] for r in rows]
     finally:
         conn.close()
 
@@ -70,7 +93,7 @@ def generate_markdown(jobs, min_score):
     lines = []
     today = datetime.now().strftime("%Y-%m-%d")
     lines.append(f"# Jobs — {today}\n")
-    lines.append(f"_Mostrando {len(jobs)} ofertas con score > {min_score}_\n")
+    lines.append(f"_Mostrando {len(jobs)} ofertas con score >= {min_score}_\n")
 
     if not jobs:
         lines.append("_No hay jobs nuevos con score suficiente hoy._")
@@ -96,19 +119,19 @@ def run_output():
     min_score = load_min_score()
     jobs = fetch_jobs(min_score)
 
-    if not jobs:
-        print("No hay jobs nuevos con score suficiente.")
-        md = generate_markdown([], min_score)
-    else:
-        md = generate_markdown(jobs, min_score)
-        job_ids = [row[0] for row in jobs]
-        mark_as_delivered(job_ids)
+    md = generate_markdown(jobs, min_score)
+
+    # Marca como delivered TODOS los jobs rankeados pendientes, no solo
+    # los que aparecen en el output. Los de score bajo también se marcan
+    # para que el cleanup de 7 días pueda eliminarlos correctamente.
+    all_ids = fetch_all_ranked_undelivered()
+    mark_as_delivered(all_ids)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
         f.write(md)
 
-    print(f"Output generado: {OUTPUT_PATH} ({len(jobs)} jobs)")
+    print(f"Output generado: {OUTPUT_PATH} ({len(jobs)} jobs en reporte)")
 
 
 if __name__ == "__main__":
