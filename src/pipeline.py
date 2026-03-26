@@ -1,6 +1,20 @@
+"""
+Pipeline principal del sistema AutoJobSearchAI.
+
+Cambios respecto a la versión anterior:
+- El scraper ahora recibe una lista de keywords en lugar de una sola.
+  Se define SCRAPE_KEYWORDS aquí como fuente de verdad para la búsqueda.
+- El first run tiene protección contra repetición: se marca con una etapa
+  "first_run_complete" en state.json. Si el pipeline se interrumpe antes
+  de guardar last_run, el siguiente run no vuelve a descargar 25 páginas.
+- init_ranker() eliminado — el schema ahora vive en src/db.py y se
+  inicializa una sola vez al comienzo del pipeline.
+"""
+
+from src.db import init_db
 from src.scrapers.chiletrabajos import run_scraper
 from src.filter import run_filter
-from src.ranker import run_ranker, init_column as init_ranker
+from src.ranker import run_ranker
 from src.output import run_output
 import sqlite3
 import json
@@ -14,16 +28,22 @@ DB_PATH = "data/jobs.db"
 FIRST_RUN_PAGES = 25
 DAILY_RUN_PAGES = 2
 
+# Keywords que se usan en cada pasada de scraping.
+# Agregar aquí nuevos términos de búsqueda — no hace falta tocar el scraper.
+SCRAPE_KEYWORDS = [
+    "data",
+    "analista",
+    "salud",
+    "business intelligence",
+    "informática",
+]
+
 
 # ---------------------------------------------------------------------------
 # State management con file lock
 # ---------------------------------------------------------------------------
 
 def load_state() -> dict:
-    """
-    Lee state.json usando un lock compartido (lectura).
-    Si el archivo no existe, retorna estado inicial limpio.
-    """
     if not os.path.exists(STATE_PATH):
         return {"last_run": None, "stages": {}}
 
@@ -40,12 +60,6 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    """
-    Escribe state.json usando un lock exclusivo (escritura).
-    Escribe en un archivo temporal primero y luego hace rename atómico,
-    para evitar que una escritura parcial corrompa el estado si el proceso
-    muere en medio de la operación.
-    """
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
     tmp_path = STATE_PATH + ".tmp"
 
@@ -58,17 +72,10 @@ def save_state(state: dict):
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
 
-    # rename es atómico en sistemas POSIX: el archivo viejo nunca queda a medias
     os.replace(tmp_path, STATE_PATH)
 
 
 def acquire_pipeline_lock():
-    """
-    Intenta adquirir un lock exclusivo sobre un archivo .lock.
-    Si ya hay otra instancia corriendo, lanza RuntimeError en lugar
-    de dejar que dos pipelines operen sobre la misma DB simultáneamente.
-    Retorna el file descriptor abierto; el llamador debe cerrarlo al terminar.
-    """
     lock_path = STATE_PATH + ".lock"
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     fd = open(lock_path, "w")
@@ -84,7 +91,6 @@ def acquire_pipeline_lock():
 
 
 def mark_stage(state: dict, stage: str, status: str = "ok", error=None):
-    """Registra el resultado de cada etapa y guarda estado inmediatamente."""
     state["stages"][stage] = {
         "status": status,
         "timestamp": datetime.utcnow().isoformat(),
@@ -94,23 +100,22 @@ def mark_stage(state: dict, stage: str, status: str = "ok", error=None):
 
 
 def is_first_run(state: dict) -> bool:
-    return state.get("last_run") is None
+    """
+    Se considera first run si nunca se completó exitosamente uno anterior.
+    Usa la etapa 'first_run_complete' como bandera explícita, separada de
+    last_run — así, si el pipeline se interrumpe antes de guardar last_run,
+    el siguiente intento no repite las 25 páginas innecesariamente.
+    """
+    return state["stages"].get("first_run_complete", {}).get("status") != "ok"
 
 
 # ---------------------------------------------------------------------------
-# Cleanup mejorado
+# Cleanup
 # ---------------------------------------------------------------------------
 
 def run_cleanup(days: int = 7):
     """
-    Elimina únicamente jobs que:
-      1. Ya fueron entregados (delivered_at IS NOT NULL), Y
-      2. Fueron entregados hace más de `days` días.
-
-    Los jobs que nunca pasaron el filtro (filtered = 0) o que pasaron
-    el filtro pero no llegaron al ranker (score IS NULL) no se borran
-    aquí — son datos de auditoría válidos. Si quieres limpiarlos,
-    ejecuta run_cleanup_rejected() por separado.
+    Elimina jobs entregados (delivered_at IS NOT NULL) hace más de `days` días.
     """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -132,15 +137,14 @@ def run_cleanup(days: int = 7):
     conn.close()
 
     if deleted > 0:
-        print(f"Cleanup: {deleted} jobs entregados eliminados (>+{days} días).")
+        print(f"Cleanup: {deleted} jobs entregados eliminados (>{days} días).")
     else:
         print("Cleanup: nada que eliminar.")
 
 
 def run_cleanup_rejected(days: int = 30):
     """
-    Limpieza opcional de jobs rechazados por el filtro o sin rankear,
-    más conservadora (30 días por defecto).
+    Limpieza opcional de jobs rechazados por el filtro o sin rankear.
     Llamar manualmente cuando la DB crezca demasiado.
     """
     conn = sqlite3.connect(DB_PATH)
@@ -156,7 +160,7 @@ def run_cleanup_rejected(days: int = 30):
     deleted = result.rowcount
     conn.commit()
     conn.close()
-    print(f"Cleanup rejected: {deleted} jobs eliminados (>+{days} días).")
+    print(f"Cleanup rejected: {deleted} jobs eliminados (>{days} días).")
 
 
 # ---------------------------------------------------------------------------
@@ -177,20 +181,22 @@ def _run_pipeline_inner():
     first_run = is_first_run(state)
 
     print("=== INIT ===")
+    init_db()
+
     if first_run:
         pages = FIRST_RUN_PAGES
-        print(f"Modo: FIRST RUN — revisando {pages} páginas (~1 semana)")
+        print(f"Modo: FIRST RUN — revisando {pages} páginas por keyword (~1 semana)")
     else:
         pages = DAILY_RUN_PAGES
-        print(f"Modo: DAILY RUN — revisando {pages} páginas (~últimas 24h)")
+        print(f"Modo: DAILY RUN — revisando {pages} páginas por keyword (~últimas 24h)")
         print(f"Último run completo: {state['last_run']}")
+
+    print(f"Keywords: {SCRAPE_KEYWORDS}")
 
     if state["stages"]:
         print("Estado etapas previas:")
         for stage, info in state["stages"].items():
             print(f"  {stage}: {info['status']} @ {info['timestamp']}")
-
-    init_ranker()
 
     print("\n=== CLEANUP ===")
     try:
@@ -202,7 +208,7 @@ def _run_pipeline_inner():
 
     print("\n=== SCRAPING ===")
     try:
-        run_scraper(pages=pages, keyword="data")
+        run_scraper(pages=pages, keywords=SCRAPE_KEYWORDS)
         mark_stage(state, "scraping")
     except Exception as e:
         mark_stage(state, "scraping", status="error", error=str(e))
@@ -231,6 +237,12 @@ def _run_pipeline_inner():
     except Exception as e:
         mark_stage(state, "output", status="error", error=str(e))
         raise
+
+    # Marca el first run como completado ANTES de actualizar last_run.
+    # Si este bloque se interrumpe entre estas dos líneas (muy improbable),
+    # el peor caso es repetir el daily run, no el first run de 25 páginas.
+    if first_run:
+        mark_stage(state, "first_run_complete")
 
     state["last_run"] = datetime.utcnow().isoformat()
     state["stages"] = {}
