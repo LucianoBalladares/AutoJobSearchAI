@@ -1,6 +1,4 @@
 {
-  "_comment": "Filtro por co-ocurrencia de categorías (Opción B). Un job pasa solo si contiene al menos una keyword de 'positive_health' Y al menos una de 'positive_data'. Esto refleja el perfil dual del candidato: salud + datos/BI. Un rol puramente clínico sin componente analítico (o un rol de datos sin contexto de salud) recibe filtered=0 y no llega al ranker.",
-
   "positive_health": [
     "salud",
     "health",

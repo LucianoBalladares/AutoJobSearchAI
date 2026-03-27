@@ -1,22 +1,23 @@
 """
 Módulo de filtrado por keywords para AutoJobSearchAI.
 
-Estrategia: co-ocurrencia de categorías (Opción B)
----------------------------------------------------
-Un job pasa el filtro (filtered=1) solo si cumple las tres condiciones:
+Estrategia: bloqueo de negativos + OR broad (revisión post-auditoría)
+----------------------------------------------------------------------
+Nueva estrategia en dos pasos:
 
-1. No contiene ninguna frase negativa exacta (multi-palabra).
-2. No contiene ninguna palabra negativa como palabra completa.
-3. Contiene al menos una keyword de 'positive_health'
-   Y al menos una keyword de 'positive_data'.
+1. BLOQUEO DURO: si el texto contiene frases o palabras negativas → filtered=0.
+   Esto elimina lo obviamente irrelevante sin depender del LLM.
 
-La condición 3 refleja el perfil dual del candidato: tecnólogo médico
-con especialización en informática en salud y BI. Un rol puramente
-clínico sin componente analítico, o un rol de datos sin contexto de
-salud, no encaja con el perfil y se descarta antes de llegar al ranker.
+2. PASS BROAD: si el texto contiene al menos UNA keyword de positive_health
+   OR al menos UNA de positive_data → filtered=1 y pasa al ranker.
 
-Esto reduce el ruido significativamente respecto al OR puro anterior
-sin depender de llamadas adicionales al LLM.
+El ranker (LLM) es el componente inteligente del sistema. El filtro solo
+debe eliminar lo que definitivamente no encaja, no intentar pre-decidir el
+fit del candidato. 
+
+El score mínimo en output_config.json actúa como segundo filtro de calidad
+después del ranker, completando el pipeline de tres capas:
+  Filtro (bloqueo obvio) → Ranker (score 1-10) → Output (score >= min_score)
 """
 
 import sqlite3
@@ -34,9 +35,6 @@ def normalize(text: str) -> str:
     Normaliza texto para comparación robusta:
     - Minúsculas
     - Elimina acentos / diacríticos (á→a, é→e, ñ→n, ü→u, etc.)
-
-    Evita falsos negativos cuando una oferta escribe "Análisis"
-    pero el keyword está como "analisis" (o viceversa).
     """
     text = text.lower()
     text = unicodedata.normalize("NFD", text)
@@ -95,14 +93,17 @@ def keyword_filter(
     negative_phrases: list[str],
 ) -> int:
     """
-    Filtro de co-ocurrencia en cuatro pasos sobre texto ya normalizado:
+    Filtro en tres pasos sobre texto ya normalizado:
 
     1. Rechaza si contiene alguna frase negativa exacta (multi-palabra).
     2. Rechaza si contiene alguna palabra negativa como palabra completa.
-    3. Rechaza si NO contiene al menos una keyword de positive_health.
-    4. Rechaza si NO contiene al menos una keyword de positive_data.
+    3. Acepta si contiene al menos UNA keyword de positive_health
+       OR al menos UNA keyword de positive_data.
+       → Si ninguna categoría hace match, rechaza.
 
-    Solo retorna 1 (pasa) si supera los cuatro pasos.
+    El OR broad deja pasar ofertas de datos sin mención explícita de salud
+    (contexto puede estar en la empresa, no en el texto) y viceversa.
+    El ranker decide el fit real con score 1-10.
     """
     t = normalize(text)
 
@@ -116,14 +117,11 @@ def keyword_filter(
         if re.search(rf"\b{re.escape(word)}\b", t):
             return 0
 
-    # Paso 3 & 4: co-ocurrencia — debe tener AMBAS categorías
+    # Paso 3: OR broad — basta con que haga match en cualquiera de las dos categorías
     has_health = _has_match(t, positive_health)
     has_data   = _has_match(t, positive_data)
 
-    if has_health and has_data:
-        return 1
-
-    return 0
+    return 1 if (has_health or has_data) else 0
 
 
 def init_column():
@@ -155,13 +153,13 @@ def run_filter():
         WHERE filtered IS NULL
     """).fetchall()
 
-    accepted = rejected_negative = rejected_no_health = rejected_no_data = 0
+    accepted = rejected_negative = rejected_no_match = 0
 
     for job_id, title, desc in rows:
         text = f"{title} {desc or ''}"
         t = normalize(text)
 
-        # Paso 1 & 2: negativos
+        # Paso 1 & 2: negativos — bloqueo duro
         blocked = False
         for phrase in keywords["negative_phrases"]:
             if phrase in t:
@@ -178,19 +176,16 @@ def run_filter():
             rejected_negative += 1
             continue
 
-        # Paso 3 & 4: co-ocurrencia
+        # Paso 3: OR broad
         has_health = _has_match(t, keywords["positive_health"])
         has_data   = _has_match(t, keywords["positive_data"])
 
-        if has_health and has_data:
+        if has_health or has_data:
             c.execute("UPDATE jobs SET filtered=1 WHERE id=?", (job_id,))
             accepted += 1
-        elif not has_health:
-            c.execute("UPDATE jobs SET filtered=0 WHERE id=?", (job_id,))
-            rejected_no_health += 1
         else:
             c.execute("UPDATE jobs SET filtered=0 WHERE id=?", (job_id,))
-            rejected_no_data += 1
+            rejected_no_match += 1
 
     conn.commit()
     conn.close()
@@ -199,8 +194,7 @@ def run_filter():
         f"Filtering done. "
         f"Aceptados: {accepted} | "
         f"Rechazados por negativos: {rejected_negative} | "
-        f"Sin contexto salud: {rejected_no_health} | "
-        f"Sin componente datos: {rejected_no_data}"
+        f"Sin match en ninguna categoría: {rejected_no_match}"
     )
 
 
