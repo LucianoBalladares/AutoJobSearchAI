@@ -48,12 +48,12 @@ def _get_model() -> str:
         )
 
     known_models = {
-        # Nueva generación 
+        # Nueva generación
         "gpt-5",
         "gpt-5-mini",
         "gpt-5-turbo",
 
-        # Generación anterior 
+        # Generación anterior
         "gpt-4o",
         "gpt-4o-mini",
 
@@ -80,38 +80,88 @@ def load_profile() -> str:
 
 
 # Excepciones transitorias de la API de OpenAI que justifican un reintento.
-# RateLimitError  → 429, esperar y reintentar.
-# APIConnectionError → fallo de red, reintentar.
-# APITimeoutError → timeout, reintentar.
-# APIStatusError con status 5xx → error del servidor, reintentar.
-# Errores de autenticación (401), content policy (400), y bugs de lógica
-# NO se reintentan: fallarían igual en el siguiente intento.
 _RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError)
 
+# Prompt del sistema: define el rol y el rubric de scoring una sola vez.
+# Se envía como system message para separarlo del contenido variable (job + perfil).
+SYSTEM_PROMPT = """\
+You are a job-fit evaluator. Your task is to score how well a job offer matches
+a candidate's profile on a scale from 1 to 10.
 
-def _call_api_with_retry(client: OpenAI, model: str, description: str, profile: str, max_attempts: int = 3) -> str:
-    """
-    Llama a la API con retry manual sobre errores transitorios conocidos.
-    Backoff exponencial: 2s → 4s → 8s.
-    Errores no transitorios (4xx que no sean 429) se propagan inmediatamente.
-    """
-    prompt = f"""
-Evaluate this job for the following candidate:
+Use this rubric strictly and consistently:
 
+9–10  Perfect fit: healthcare AND data/BI context, matches candidate's tools
+      (Power BI, SQL, Python), junior or mid-level seniority.
+      Example: "Analista de Datos en hospital", "Health Informatics Specialist".
+
+7–8   Strong fit: one dimension is strong (healthcare OR data), partial tool
+      overlap, or seniority slightly above but reachable.
+      Example: "Data Analyst" at a health insurance company, "BI Developer" at
+      a pharma firm, "Informático de Salud" with some analytics.
+
+5–6   Partial fit: adjacent role with some overlap but missing a key dimension.
+      Example: pure data role with no health context, or clinical informatics
+      with no BI/analytics component.
+
+3–4   Weak fit: role is too far from the profile but not completely unrelated.
+      Example: general IT support at a hospital, software QA with no data work.
+
+1–2   No fit: wrong sector, wrong level, or no overlap with the profile.
+
+Penalize heavily (score ≤ 3) when:
+- The role is purely sales, marketing, or customer service.
+- The role requires 5+ years of senior experience.
+- The role is purely clinical with zero data/analytics component.
+- The role involves manual/physical labor unrelated to informatics.
+
+Return ONLY a single integer from 1 to 10. No explanation, no punctuation, just the number.\
+"""
+
+
+def _build_user_prompt(description: str, profile: str) -> str:
+    """
+    Construye el mensaje de usuario con el perfil y la descripción del job.
+    Separar system/user permite que el modelo cachee el system prompt entre
+    llamadas (feature de algunos proveedores) y mantiene el contexto más limpio.
+    """
+    return f"""\
+Candidate profile:
 {profile}
 
 Job description:
 {description[:DESCRIPTION_MAX_CHARS]}
 
-Return ONLY a single integer from 1 to 10. No explanation, no punctuation, just the number.
+Score:\
 """
+
+
+def _call_api_with_retry(
+    client: OpenAI,
+    model: str,
+    description: str,
+    profile: str,
+    max_attempts: int = 3,
+) -> str:
+    """
+    Llama a la API con retry manual sobre errores transitorios conocidos.
+    Backoff exponencial: 2s → 4s → 8s.
+    Errores no transitorios (4xx que no sean 429) se propagan inmediatamente.
+
+    Usa system + user messages para un scoring más consistente:
+    - system: rubric fijo, define el comportamiento del evaluador.
+    - user: contenido variable (perfil + descripción del job).
+    """
     last_exc = None
     for attempt in range(1, max_attempts + 1):
         try:
             response = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": _build_user_prompt(description, profile)},
+                ],
+                temperature=0,
+                max_tokens=5,  # Solo necesitamos un entero de 1-2 dígitos
             )
             return response.choices[0].message.content.strip()
 
@@ -122,7 +172,6 @@ Return ONLY a single integer from 1 to 10. No explanation, no punctuation, just 
             time.sleep(wait)
 
         except APIStatusError as e:
-            # 5xx → transitorio, reintentar. 4xx que no sean 429 → no reintentar.
             if e.status_code >= 500:
                 last_exc = e
                 wait = 2 ** attempt
@@ -194,7 +243,6 @@ def run_ranker(limit=20):
         else:
             print(f"  [skip] Job {job_id} sin score válido")
 
-        # Rate limiting proactivo: pausa entre requests salvo en el último.
         if i < len(rows):
             time.sleep(INTER_REQUEST_DELAY)
 
