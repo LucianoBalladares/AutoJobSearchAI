@@ -2,6 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 import time
+import sqlite3
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from src.db import init_db, get_connection
@@ -16,8 +17,6 @@ def save_job(job):
         print(f"  [skip] Oferta sin título o URL, descartada.")
         return
 
-    # Usa get_connection() como fuente única de conexiones a la DB.
-    # El try/finally garantiza que la conexión se cierra aunque falle el INSERT.
     with get_connection() as conn:
         c = conn.cursor()
         try:
@@ -28,10 +27,11 @@ def save_job(job):
                 job["title"], job["company"], job["location"], job["description"],
                 job["url"], job["date"], job["source"], job["created_at"]
             ))
-            conn.commit()
-        except Exception:
-            # IntegrityError por URL duplicada: silencioso (comportamiento esperado).
-            # Cualquier otro error se deja pasar para no interrumpir el loop.
+            # El commit lo hace el context manager get_connection() al salir
+            # del bloque with. No se necesita conn.commit() explícito aquí.
+        except sqlite3.IntegrityError:
+            # URL duplicada (UNIQUE constraint): comportamiento esperado, silencioso.
+            # Cualquier otro error de DB se propaga para no ocultar bugs reales.
             pass
 
 
