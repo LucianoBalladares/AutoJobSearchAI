@@ -1,23 +1,3 @@
-"""
-Pipeline principal del sistema AutoJobSearchAI.
-
-Cambios respecto a la versión anterior:
-- Import de run_ranker movido a _run_pipeline_inner() (lazy import).
-  Antes, importar pipeline.py fallaba si openai o python-dotenv no estaban
-  instalados o si .env no existía, incluso sin intentar correr el ranker.
-  Con el import lazy, el error ocurre solo cuando el ranker realmente se ejecuta,
-  con un mensaje claro y accionable.
-- Lock de proceso basado en PID: si el proceso muere con SIGKILL, el siguiente
-  run detecta que el PID en el lockfile ya no existe y toma el lock de forma
-  segura, en lugar de quedar bloqueado para siempre.
-- Scrapers se cargan dinámicamente desde src/scrapers/ mediante load_scrapers().
-  Para agregar una nueva fuente basta crear el archivo; no hay que tocar pipeline.py.
-- fcntl solo se importa en Unix. En Windows se usa un fallback sin locking
-  (suficiente para uso personal en un solo proceso).
-- run_cleanup_rejected() se invoca en el bloque de cleanup para que jobs
-  rechazados o sin score no se acumulen indefinidamente en la DB.
-"""
-
 from src.db import init_db
 from src.scrapers import load_scrapers
 from src.filter import run_filter
@@ -27,11 +7,6 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta
-
-# run_ranker se importa dentro de _run_pipeline_inner() (lazy import).
-# Importarlo aquí causaba que todo el pipeline fallara al inicio si openai
-# o python-dotenv no estaban disponibles, incluso en runs que no necesitaban
-# el ranker (ej. un dry-run de filtrado o de output).
 
 STATE_PATH = "config/state.json"
 LOCK_PATH  = STATE_PATH + ".lock"
