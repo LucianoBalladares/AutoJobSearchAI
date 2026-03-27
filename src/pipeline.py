@@ -2,6 +2,11 @@
 Pipeline principal del sistema AutoJobSearchAI.
 
 Cambios respecto a la versión anterior:
+- Import de run_ranker movido a _run_pipeline_inner() (lazy import).
+  Antes, importar pipeline.py fallaba si openai o python-dotenv no estaban
+  instalados o si .env no existía, incluso sin intentar correr el ranker.
+  Con el import lazy, el error ocurre solo cuando el ranker realmente se ejecuta,
+  con un mensaje claro y accionable.
 - Lock de proceso basado en PID: si el proceso muere con SIGKILL, el siguiente
   run detecta que el PID en el lockfile ya no existe y toma el lock de forma
   segura, en lugar de quedar bloqueado para siempre.
@@ -16,13 +21,17 @@ Cambios respecto a la versión anterior:
 from src.db import init_db
 from src.scrapers import load_scrapers
 from src.filter import run_filter
-from src.ranker import run_ranker
 from src.output import run_output
 import sqlite3
 import json
 import os
 import sys
 from datetime import datetime, timedelta
+
+# run_ranker se importa dentro de _run_pipeline_inner() (lazy import).
+# Importarlo aquí causaba que todo el pipeline fallara al inicio si openai
+# o python-dotenv no estaban disponibles, incluso en runs que no necesitaban
+# el ranker (ej. un dry-run de filtrado o de output).
 
 STATE_PATH = "config/state.json"
 LOCK_PATH  = STATE_PATH + ".lock"
@@ -248,12 +257,11 @@ def _run_pipeline_inner() -> None:
 
     # -------------------------------------------------------------------
     # Cleanup
-    # Ejecuta ambas funciones: jobs entregados (7d) y jobs descartados (30d).
     # -------------------------------------------------------------------
     print("\n=== CLEANUP ===")
     try:
         run_cleanup(days=7)
-        run_cleanup_rejected(days=30)   # <-- antes no se llamaba
+        run_cleanup_rejected(days=30)
         mark_stage(state, "cleanup")
     except Exception as e:
         mark_stage(state, "cleanup", status="error", error=str(e))
@@ -279,6 +287,11 @@ def _run_pipeline_inner() -> None:
 
     print("\n=== RANKING ===")
     try:
+        # Import lazy: se realiza aquí y no al inicio del módulo.
+        # Esto garantiza que pipeline.py puede importarse sin tener openai
+        # instalado o .env configurado. El error ocurre solo si el ranker
+        # realmente se ejecuta, con un mensaje claro y accionable.
+        from src.ranker import run_ranker
         run_ranker(limit=50 if first_run else 20)
         mark_stage(state, "ranking")
     except Exception as e:
