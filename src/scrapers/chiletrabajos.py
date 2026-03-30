@@ -9,32 +9,22 @@ from src.db import init_db, get_connection
 
 BASE_URL = "https://www.chiletrabajos.cl"
 
-# Categorías relevantes para el perfil (Health Informatics + Data Analytics).
-# La paginación usa offset de 30 en 30:
-#   Página 1 → /trabajos/{categoria}
-#   Página 2 → /trabajos/{categoria}/30
-#   Página 3 → /trabajos/{categoria}/60   ... etc.
 CATEGORIES = [
-    "informatica",              # Informática / Telecomunicaciones
-    "medicina",                 # Medicina / Salud
-    "administracion",           # Administración (puede tener roles de analista/BI)
-    "ingenieria",               # Profesionales y Técnicos
-    "asistenteadministrativo",  # A veces aparecen roles de datos aquí
+    "informatica",
+    "medicina",
+    "administracion",
+    "ingenieria",
+    "asistenteadministrativo",
 ]
 
 PAGE_DELAY = 3
 ITEMS_PER_PAGE = 30
-
-# Si en N páginas consecutivas no se guarda ningún job nuevo, asumimos
-# que el sitio está repitiendo resultados y paramos esa categoría.
 MAX_EMPTY_PAGES = 2
 
 
 def save_job(job):
     if not job.get("title") or not job.get("url"):
-        print(f"  [skip] Oferta sin título o URL, descartada.")
         return False
-
     with get_connection() as conn:
         c = conn.cursor()
         try:
@@ -45,9 +35,9 @@ def save_job(job):
                 job["title"], job["company"], job["location"], job["description"],
                 job["url"], job["date"], job["source"], job["created_at"]
             ))
-            return True  # job nuevo guardado
+            return True
         except sqlite3.IntegrityError:
-            return False  # URL duplicada — ya existe
+            return False
 
 
 def get_existing_urls():
@@ -68,6 +58,14 @@ def _fetch(url, headers=None):
 
 
 def get_job_description(url: str) -> str:
+    """
+    Obtiene la descripción completa desde la página individual de la oferta.
+
+    La descripción en Chiletrabajos NO está en #descripcion — está en el
+    bloque de texto que sigue al h3 'Descripción oferta de trabajo'.
+    Estrategia: buscar todos los párrafos/texto dentro del contenedor
+    principal de la oferta, excluyendo navegación y widgets laterales.
+    """
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = _fetch(url, headers=headers)
@@ -79,17 +77,40 @@ def get_job_description(url: str) -> str:
         return ""
 
     soup = BeautifulSoup(r.text, "html.parser")
+
+    # Intento 1: buscar el h3 que dice "Descripción oferta de trabajo"
+    # y recolectar el texto que sigue hasta el próximo h3/hr.
+    for h3 in soup.find_all("h3"):
+        if "descripci" in h3.get_text(strip=True).lower():
+            # Recolectar siblings de texto hasta el próximo bloque estructural
+            parts = []
+            for sibling in h3.next_siblings:
+                if sibling.name in ("h3", "h2", "h4", "hr", "table"):
+                    break
+                text = sibling.get_text(separator=" ", strip=True) if hasattr(sibling, "get_text") else str(sibling).strip()
+                if text:
+                    parts.append(text)
+            result = " ".join(parts).strip()
+            if result:
+                return result
+
+    # Intento 2: buscar por ID legacy (puede existir en algunas ofertas)
     desc = soup.select_one("#descripcion")
-    return desc.get_text(separator=" ", strip=True) if desc else ""
+    if desc:
+        return desc.get_text(separator=" ", strip=True)
+
+    # Intento 3: buscar el div/section con más texto en el área central
+    # (heurística de último recurso)
+    main = soup.select_one("div.col-md-8, div.job-detail, article, main")
+    if main:
+        text = main.get_text(separator=" ", strip=True)
+        if len(text) > 100:
+            return text[:3000]  # cap para no guardar páginas enteras
+
+    return ""
 
 
 def build_category_url(category: str, page: int) -> str:
-    """
-    Construye la URL correcta según la estructura real de Chiletrabajos:
-      Página 1 → /trabajos/{categoria}
-      Página 2 → /trabajos/{categoria}/30
-      Página 3 → /trabajos/{categoria}/60
-    """
     if page == 1:
         return f"{BASE_URL}/trabajos/{category}"
     else:
@@ -98,11 +119,6 @@ def build_category_url(category: str, page: int) -> str:
 
 
 def scrape_page(category: str, page: int = 1, existing_urls: set = None):
-    """
-    Scrapea una página de una categoría.
-    Retorna (jobs_nuevos, total_encontrados).
-    Retorna (None, 0) si la página no tiene resultados.
-    """
     if existing_urls is None:
         existing_urls = get_existing_urls()
 
@@ -139,29 +155,42 @@ def scrape_page(category: str, page: int = 1, existing_urls: set = None):
                 print(f"  [skip] {title}")
                 continue
 
+            # Buscar el contenedor del listado para extraer empresa, fecha
+            # y el extracto de descripción ya disponible en la lista.
             container = link.find_parent()
             while container and container.name not in ("li", "div", "article", "section"):
                 container = container.find_parent()
 
-            if not container:
-                print(f"  [warn] No se encontró contenedor para: {title}")
-                continue
+            company, location, date, excerpt = "", "", "", ""
 
-            h3_tags = container.find_all("h3")
-            company_location = h3_tags[0].get_text(strip=True) if len(h3_tags) > 0 else ""
-            date = h3_tags[1].get_text(strip=True) if len(h3_tags) > 1 else ""
+            if container:
+                h3_tags = container.find_all("h3")
+                company_location = h3_tags[0].get_text(strip=True) if len(h3_tags) > 0 else ""
+                date = h3_tags[1].get_text(strip=True) if len(h3_tags) > 1 else ""
 
-            if "," in company_location:
-                company, location = company_location.rsplit(",", 1)
-                company = company.strip()
-                location = location.strip()
-            else:
-                company = company_location
-                location = ""
+                if "," in company_location:
+                    company, location = company_location.rsplit(",", 1)
+                    company = company.strip()
+                    location = location.strip()
+                else:
+                    company = company_location
 
-            description = get_job_description(job_url)
+                # El párrafo/texto corto del listado ya tiene un buen resumen.
+                # Lo usamos como descripción base y lo complementamos con
+                # el texto completo de la página individual.
+                p_tags = container.find_all("p")
+                excerpt = " ".join(p.get_text(strip=True) for p in p_tags if p.get_text(strip=True))
+
+            # Obtener descripción completa desde la página de la oferta.
+            full_description = get_job_description(job_url)
             existing_urls.add(job_url)
             time.sleep(1)
+
+            # Usar descripción completa si existe; fallback al extracto del listado.
+            description = full_description if full_description else excerpt
+
+            if not description:
+                print(f"  [warn] Sin descripción para: {title}")
 
             jobs.append({
                 "title": title,
@@ -173,7 +202,7 @@ def scrape_page(category: str, page: int = 1, existing_urls: set = None):
                 "source": "chiletrabajos",
                 "created_at": datetime.utcnow().isoformat()
             })
-            print(f"  [+] {title} — {company}")
+            print(f"  [+] {title} — {company} {'(sin desc)' if not description else ''}")
 
         except Exception as e:
             print(f"  Error en oferta: {e}")
@@ -184,26 +213,20 @@ def scrape_page(category: str, page: int = 1, existing_urls: set = None):
 
 def run_scraper(pages=2, keywords=None):
     """
-    Interfaz estándar del pipeline. El parámetro `keywords` se ignora porque
-    Chiletrabajos no usa búsqueda por texto libre — opera por categorías fijas.
-
-    Early-stop por categoría: si MAX_EMPTY_PAGES páginas consecutivas no
-    aportan ningún job nuevo, asumimos que el sitio está repitiendo y paramos.
-    Esto evita desperdiciar tiempo en páginas fantasma como las de
-    asistenteadministrativo pasada la página 15.
+    Interfaz estándar del pipeline. keywords se ignora — Chiletrabajos
+    usa categorías fijas, no búsqueda por texto libre.
     """
     init_db()
     existing_urls = get_existing_urls()
 
     for category in CATEGORIES:
         print(f"\n=== Categoría: '{category}' ===")
-        empty_streak = 0  # páginas consecutivas sin jobs nuevos
+        empty_streak = 0
 
         for page in range(1, pages + 1):
             print(f"\nScraping página {page}...")
             result, total_found = scrape_page(category, page, existing_urls)
 
-            # Página sin resultados → fin real de la categoría
             if result is None:
                 print("No hay más páginas. Siguiente categoría.")
                 break
@@ -213,14 +236,12 @@ def run_scraper(pages=2, keywords=None):
 
             if saved == 0:
                 empty_streak += 1
-                print(f"  [warn] Página vacía ({empty_streak}/{MAX_EMPTY_PAGES}). "
-                      f"El sitio puede estar repitiendo resultados.")
+                print(f"  [warn] Página vacía ({empty_streak}/{MAX_EMPTY_PAGES}).")
                 if empty_streak >= MAX_EMPTY_PAGES:
-                    print(f"  [stop] {MAX_EMPTY_PAGES} páginas seguidas sin jobs nuevos. "
-                          f"Saltando a la siguiente categoría.")
+                    print(f"  [stop] {MAX_EMPTY_PAGES} páginas seguidas sin jobs nuevos. Siguiente categoría.")
                     break
             else:
-                empty_streak = 0  # reset si encontramos algo nuevo
+                empty_streak = 0
 
             if page < pages:
                 print(f"  Esperando {PAGE_DELAY}s antes de la siguiente página...")
