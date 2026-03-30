@@ -9,6 +9,9 @@ venv/
 # DB
 data/jobs.db
 
+# Output
+output/
+
 # OS
 .DS_Store
 Thumbs.db
