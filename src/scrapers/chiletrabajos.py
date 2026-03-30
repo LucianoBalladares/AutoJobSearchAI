@@ -8,8 +8,22 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from src.db import init_db, get_connection
 
 BASE_URL = "https://www.chiletrabajos.cl"
-SEARCH_URL = BASE_URL + "/encuentra-un-empleo"
+
+# Categorías relevantes para el perfil (Health Informatics + Data Analytics).
+# La paginación usa offset de 30 en 30:
+#   Página 1 → /trabajos/{categoria}
+#   Página 2 → /trabajos/{categoria}/30
+#   Página 3 → /trabajos/{categoria}/60   ... etc.
+CATEGORIES = [
+    "informatica",          # Informática / Telecomunicaciones
+    "medicina",             # Medicina / Salud
+    "administracion",       # Administración (puede tener roles de analista/BI)
+    "ingenieria",           # Profesionales y Técnicos
+    "asistenteadministrativo",  # A veces aparecen roles de datos aquí
+]
+
 PAGE_DELAY = 3
+ITEMS_PER_PAGE = 30
 
 
 def save_job(job):
@@ -27,12 +41,8 @@ def save_job(job):
                 job["title"], job["company"], job["location"], job["description"],
                 job["url"], job["date"], job["source"], job["created_at"]
             ))
-            # El commit lo hace el context manager get_connection() al salir
-            # del bloque with. No se necesita conn.commit() explícito aquí.
         except sqlite3.IntegrityError:
-            # URL duplicada (UNIQUE constraint): comportamiento esperado, silencioso.
-            # Cualquier otro error de DB se propaga para no ocultar bugs reales.
-            pass
+            pass  # URL duplicada — esperado, silencioso
 
 
 def get_existing_urls():
@@ -48,12 +58,8 @@ def get_existing_urls():
     wait=wait_exponential(multiplier=1, min=2, max=10),
     reraise=True,
 )
-def _fetch(url, params=None, headers=None):
-    """
-    GET con retry automático solo en errores de red y timeouts.
-    Errores HTTP (4xx/5xx) no se reintentan — necesitan intervención manual.
-    """
-    return requests.get(url, params=params, headers=headers, timeout=10)
+def _fetch(url, headers=None):
+    return requests.get(url, headers=headers, timeout=10)
 
 
 def get_job_description(url: str) -> str:
@@ -72,24 +78,33 @@ def get_job_description(url: str) -> str:
     return desc.get_text(separator=" ", strip=True) if desc else ""
 
 
-def build_page_url(page, keyword):
-    params = {}
-    if keyword:
-        params["Busqueda"] = keyword
-    if page > 1:
-        params["pagina"] = page
-    return SEARCH_URL, params
+def build_category_url(category: str, page: int) -> str:
+    """
+    Construye la URL correcta según la estructura real de Chiletrabajos:
+      Página 1 → /trabajos/{categoria}
+      Página 2 → /trabajos/{categoria}/30
+      Página 3 → /trabajos/{categoria}/60
+    """
+    if page == 1:
+        return f"{BASE_URL}/trabajos/{category}"
+    else:
+        offset = (page - 1) * ITEMS_PER_PAGE
+        return f"{BASE_URL}/trabajos/{category}/{offset}"
 
 
-def scrape_page(page=1, keyword="data", existing_urls=None):
+def scrape_page(category: str, page: int = 1, existing_urls: set = None):
+    """
+    Scrapea una página de una categoría específica.
+    Retorna lista de jobs nuevos, o None si la página no tiene resultados.
+    """
     if existing_urls is None:
         existing_urls = get_existing_urls()
 
-    url, params = build_page_url(page, keyword)
+    url = build_category_url(category, page)
     headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        r = _fetch(url, params=params, headers=headers)
+        r = _fetch(url, headers=headers)
         print(f"  URL: {r.url}")
         print(f"  Status: {r.status_code}")
         if r.status_code != 200:
@@ -162,24 +177,21 @@ def scrape_page(page=1, keyword="data", existing_urls=None):
 
 def run_scraper(pages=2, keywords=None):
     """
-    Implementa la interfaz estándar de scrapers: run_scraper(pages, keywords).
-    Todos los scrapers del proyecto deben exportar esta misma firma para que
-    pipeline.py pueda cargarlos dinámicamente sin imports hardcodeados.
+    Interfaz estándar del pipeline. El parámetro `keywords` se ignora porque
+    Chiletrabajos no usa búsqueda por texto libre — opera por categorías fijas.
+    Las categorías relevantes para el perfil están definidas en CATEGORIES.
     """
-    if keywords is None:
-        keywords = ["data"]
-
     init_db()
     existing_urls = get_existing_urls()
 
-    for keyword in keywords:
-        print(f"\n=== Keyword: '{keyword}' ===")
+    for category in CATEGORIES:
+        print(f"\n=== Categoría: '{category}' ===")
         for page in range(1, pages + 1):
             print(f"\nScraping página {page}...")
-            result = scrape_page(page, keyword, existing_urls)
+            result = scrape_page(category, page, existing_urls)
 
             if result is None:
-                print("No hay más páginas con resultados. Siguiente keyword.")
+                print("No hay más páginas. Siguiente categoría.")
                 break
 
             for job in result:
@@ -194,4 +206,4 @@ def run_scraper(pages=2, keywords=None):
 
 
 if __name__ == "__main__":
-    run_scraper(pages=2, keywords=["data", "salud", "analista"])
+    run_scraper(pages=5)
