@@ -15,21 +15,25 @@ BASE_URL = "https://www.chiletrabajos.cl"
 #   Página 2 → /trabajos/{categoria}/30
 #   Página 3 → /trabajos/{categoria}/60   ... etc.
 CATEGORIES = [
-    "informatica",          # Informática / Telecomunicaciones
-    "medicina",             # Medicina / Salud
-    "administracion",       # Administración (puede tener roles de analista/BI)
-    "ingenieria",           # Profesionales y Técnicos
+    "informatica",              # Informática / Telecomunicaciones
+    "medicina",                 # Medicina / Salud
+    "administracion",           # Administración (puede tener roles de analista/BI)
+    "ingenieria",               # Profesionales y Técnicos
     "asistenteadministrativo",  # A veces aparecen roles de datos aquí
 ]
 
 PAGE_DELAY = 3
 ITEMS_PER_PAGE = 30
 
+# Si en N páginas consecutivas no se guarda ningún job nuevo, asumimos
+# que el sitio está repitiendo resultados y paramos esa categoría.
+MAX_EMPTY_PAGES = 2
+
 
 def save_job(job):
     if not job.get("title") or not job.get("url"):
         print(f"  [skip] Oferta sin título o URL, descartada.")
-        return
+        return False
 
     with get_connection() as conn:
         c = conn.cursor()
@@ -41,8 +45,9 @@ def save_job(job):
                 job["title"], job["company"], job["location"], job["description"],
                 job["url"], job["date"], job["source"], job["created_at"]
             ))
+            return True  # job nuevo guardado
         except sqlite3.IntegrityError:
-            pass  # URL duplicada — esperado, silencioso
+            return False  # URL duplicada — ya existe
 
 
 def get_existing_urls():
@@ -94,8 +99,9 @@ def build_category_url(category: str, page: int) -> str:
 
 def scrape_page(category: str, page: int = 1, existing_urls: set = None):
     """
-    Scrapea una página de una categoría específica.
-    Retorna lista de jobs nuevos, o None si la página no tiene resultados.
+    Scrapea una página de una categoría.
+    Retorna (jobs_nuevos, total_encontrados).
+    Retorna (None, 0) si la página no tiene resultados.
     """
     if existing_urls is None:
         existing_urls = get_existing_urls()
@@ -108,18 +114,19 @@ def scrape_page(category: str, page: int = 1, existing_urls: set = None):
         print(f"  URL: {r.url}")
         print(f"  Status: {r.status_code}")
         if r.status_code != 200:
-            return []
+            return [], 0
     except requests.RequestException as e:
         print(f"  Request error (tras reintentos): {e}")
-        return []
+        return [], 0
 
     soup = BeautifulSoup(r.text, "html.parser")
     job_links = soup.select("h2 a[href*='/trabajo/']")
-    print(f"  Ofertas encontradas: {len(job_links)}")
+    total_found = len(job_links)
+    print(f"  Ofertas encontradas: {total_found}")
 
     if not job_links:
-        print("  [info] Sin resultados — probablemente última página alcanzada.")
-        return None
+        print("  [info] Sin resultados — fin de categoría.")
+        return None, 0
 
     jobs = []
 
@@ -172,31 +179,48 @@ def scrape_page(category: str, page: int = 1, existing_urls: set = None):
             print(f"  Error en oferta: {e}")
             continue
 
-    return jobs
+    return jobs, total_found
 
 
 def run_scraper(pages=2, keywords=None):
     """
     Interfaz estándar del pipeline. El parámetro `keywords` se ignora porque
     Chiletrabajos no usa búsqueda por texto libre — opera por categorías fijas.
-    Las categorías relevantes para el perfil están definidas en CATEGORIES.
+
+    Early-stop por categoría: si MAX_EMPTY_PAGES páginas consecutivas no
+    aportan ningún job nuevo, asumimos que el sitio está repitiendo y paramos.
+    Esto evita desperdiciar tiempo en páginas fantasma como las de
+    asistenteadministrativo pasada la página 15.
     """
     init_db()
     existing_urls = get_existing_urls()
 
     for category in CATEGORIES:
         print(f"\n=== Categoría: '{category}' ===")
+        empty_streak = 0  # páginas consecutivas sin jobs nuevos
+
         for page in range(1, pages + 1):
             print(f"\nScraping página {page}...")
-            result = scrape_page(category, page, existing_urls)
+            result, total_found = scrape_page(category, page, existing_urls)
 
+            # Página sin resultados → fin real de la categoría
             if result is None:
                 print("No hay más páginas. Siguiente categoría.")
                 break
 
-            for job in result:
-                save_job(job)
-            print(f"Guardados: {len(result)} nuevos jobs")
+            saved = sum(1 for job in result if save_job(job))
+            print(f"Guardados: {saved} nuevos jobs (de {total_found} encontrados)")
+
+            if saved == 0:
+                empty_streak += 1
+                print(f"  [warn] Página vacía ({empty_streak}/{MAX_EMPTY_PAGES}). "
+                      f"El sitio puede estar repitiendo resultados.")
+                if empty_streak >= MAX_EMPTY_PAGES:
+                    print(f"  [stop] {MAX_EMPTY_PAGES} páginas seguidas sin jobs nuevos. "
+                          f"Saltando a la siguiente categoría.")
+                    break
+            else:
+                empty_streak = 0  # reset si encontramos algo nuevo
 
             if page < pages:
                 print(f"  Esperando {PAGE_DELAY}s antes de la siguiente página...")
