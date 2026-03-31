@@ -267,7 +267,7 @@ def _run_pipeline_inner() -> None:
         # instalado o .env configurado. El error ocurre solo si el ranker
         # realmente se ejecuta, con un mensaje claro y accionable.
         from src.ranker import run_ranker
-        run_ranker(limit=50 if first_run else 20)
+        run_ranker(limit=2000)
         mark_stage(state, "ranking")
     except Exception as e:
         mark_stage(state, "ranking", status="error", error=str(e))
