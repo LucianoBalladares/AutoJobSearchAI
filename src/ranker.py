@@ -49,9 +49,10 @@ def _get_model() -> str:
 
     known_models = {
         # Nueva generación
-        "gpt-5",
-        "gpt-5-mini",
-        "gpt-5-turbo",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.4-pro",
+        "gpt-5.4-nano",
 
         # Generación anterior
         "gpt-4o",
@@ -161,7 +162,7 @@ def _call_api_with_retry(
                     {"role": "user",   "content": _build_user_prompt(description, profile)},
                 ],
                 temperature=0,
-                max_tokens=5,  # Solo necesitamos un entero de 1-2 dígitos
+                max_completion_tokens=5,  # Solo necesitamos un entero de 1-2 dígitos
             )
             return response.choices[0].message.content.strip()
 
