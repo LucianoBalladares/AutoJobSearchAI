@@ -1,71 +1,72 @@
 """
-Paquete de scrapers para AutoJobSearchAI.
+Módulo de scrapers — autodiscovery automático.
 
-Este archivo cumple dos roles:
-1. Declara src/scrapers/ como paquete Python.
-2. Expone load_scrapers() como símbolo público del paquete, de modo que
-   `from src.scrapers import load_scrapers` funcione sin importar el
-   módulo interno por nombre.
+Cómo agregar un nuevo scraper
+------------------------------
+1. Crear un archivo en src/scrapers/, por ejemplo: getonboard.py
+2. Exportar una función con esta firma exacta:
 
-Convención para scrapers nuevos
---------------------------------
-Cada archivo en este directorio debe exportar una función con esta firma:
+       def run_scraper(pages: int, keywords: list[str]) -> None:
+           ...
 
-    def run_scraper(pages: int, keywords: list[str]) -> None
+   - pages: tope máximo de páginas (seguridad). El corte real debe
+     implementarse dentro del scraper según la fecha de publicación
+     (antigüedad > MAX_AGE_DAYS días).
+   - keywords: lista de términos de búsqueda pasada desde el pipeline.
+     Úsalas si el sitio soporta búsqueda por texto; ignóralas si usa
+     categorías fijas (como Chiletrabajos).
 
-load_scrapers() la descubre automáticamente. No es necesario tocar
-pipeline.py ni este archivo al agregar una nueva fuente.
+3. Listo. load_scrapers() lo detectará automáticamente en el próximo run.
 
-Ejemplo mínimo (src/scrapers/mi_fuente.py):
+No es necesario modificar __init__.py, pipeline.py ni ningún otro archivo.
 
-    from src.db import init_db, get_connection
-    from datetime import datetime
+Convención de nombres
+---------------------
+El nombre del módulo (sin .py) se usa como identificador del scraper
+en los logs del pipeline. Elige un nombre descriptivo del sitio.
 
-    def run_scraper(pages=2, keywords=None):
-        if keywords is None:
-            keywords = ["data"]
-        init_db()
-        # ... lógica de scraping ...
+Scrapers disponibles actualmente:
+    - chiletrabajos  (src/scrapers/chiletrabajos.py)
 """
 
 import importlib
+import os
 import pkgutil
-from pathlib import Path
 from typing import Callable
 
 
 def load_scrapers() -> dict[str, Callable]:
     """
-    Descubre y carga todos los módulos en src/scrapers/ que exporten
-    run_scraper(). Retorna un dict {nombre: función}.
+    Descubre y carga todos los scrapers disponibles en este paquete.
 
-    Si un módulo falla al importar (dependencia faltante, error de sintaxis),
-    se loguea el error y se omite ese scraper sin interrumpir los demás.
+    Retorna un dict {nombre: función run_scraper} para cada módulo
+    en src/scrapers/ que exporte run_scraper().
 
-    Este símbolo se exporta explícitamente desde el paquete para que
-    `from src.scrapers import load_scrapers` funcione de forma directa.
+    Módulos que NO exportan run_scraper() se ignoran silenciosamente
+    (permite tener helpers, utils, base classes, etc. en la carpeta).
+
+    Módulos que fallan al importarse se reportan como warning sin
+    interrumpir el pipeline: los scrapers restantes siguen funcionando.
     """
-    scrapers: dict[str, Callable] = {}
-    package_path = Path(__file__).parent
-    package_name = __name__  # "src.scrapers"
+    scrapers = {}
+    package_dir = os.path.dirname(__file__)
 
-    for module_info in pkgutil.iter_modules([str(package_path)]):
-        module_name = f"{package_name}.{module_info.name}"
+    for finder, module_name, is_pkg in pkgutil.iter_modules([package_dir]):
+        # Saltar el propio __init__ y módulos de soporte sin run_scraper
+        if module_name.startswith("_"):
+            continue
+
+        full_name = f"src.scrapers.{module_name}"
         try:
-            module = importlib.import_module(module_name)
+            module = importlib.import_module(full_name)
         except Exception as e:
-            print(f"[scrapers] No se pudo cargar {module_name}: {e}")
+            print(f"[scrapers] Warning: no se pudo importar '{full_name}': {e}")
             continue
 
         if hasattr(module, "run_scraper") and callable(module.run_scraper):
-            scrapers[module_info.name] = module.run_scraper
+            scrapers[module_name] = module.run_scraper
         else:
-            print(f"[scrapers] {module_name} no exporta run_scraper(), ignorado.")
+            # Módulo de soporte sin run_scraper — silencioso
+            pass
 
     return scrapers
-
-
-# Exportación explícita del símbolo público de este paquete.
-# Cualquier import del estilo `from src.scrapers import load_scrapers`
-# resuelve aquí sin necesidad de conocer el módulo interno.
-__all__ = ["load_scrapers"]

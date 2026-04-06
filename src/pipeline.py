@@ -1,3 +1,17 @@
+"""
+Pipeline principal de AutoJobSearchAI.
+
+Cambios respecto a la versión anterior:
+- first_run_complete se guarda como clave de primer nivel en state.json,
+  no dentro de 'stages' (que se resetea en cada run exitoso). Esto evita
+  que el pipeline entre siempre en modo FIRST RUN.
+- Se eliminó la lógica de FIRST_RUN_PAGES vs DAILY_RUN_PAGES. El corte
+  real lo define la fecha en cada scraper (MAX_AGE_DAYS). El parámetro
+  `pages` que se pasa a los scrapers es solo un tope de seguridad.
+- Facilitar nuevos scrapers: load_scrapers() descubre automáticamente
+  cualquier módulo en src/scrapers/ que exporte run_scraper().
+"""
+
 from src.db import init_db
 from src.scrapers import load_scrapers
 from src.filter import run_filter
@@ -12,8 +26,9 @@ STATE_PATH = "config/state.json"
 LOCK_PATH  = STATE_PATH + ".lock"
 DB_PATH    = "data/jobs.db"
 
-FIRST_RUN_PAGES = 25
-DAILY_RUN_PAGES = 2
+# Tope máximo de páginas por scraper/categoría (seguridad).
+# El corte real lo define la fecha en cada scraper (MAX_AGE_DAYS).
+MAX_PAGES_SAFETY = 50
 
 SCRAPE_KEYWORDS = [
     "data",
@@ -41,13 +56,6 @@ else:
 def acquire_pipeline_lock() -> None:
     """
     Implementa un lockfile basado en PID que sobrevive a reinicios abruptos.
-
-    Flujo:
-    1. Si no existe el lockfile → crear con PID actual, continuar.
-    2. Si existe → leer el PID guardado.
-       a. Si ese PID sigue activo → otro proceso está corriendo, abortar.
-       b. Si ese PID no existe → proceso anterior murió (SIGKILL, crash),
-          el lock es huérfano: sobreescribir con PID actual y continuar.
     """
     if not _FCNTL_AVAILABLE:
         _write_lockfile()
@@ -78,7 +86,6 @@ def _write_lockfile() -> None:
 
 
 def release_pipeline_lock() -> None:
-    """Elimina el lockfile al terminar el pipeline (normal o por excepción)."""
     try:
         os.remove(LOCK_PATH)
     except FileNotFoundError:
@@ -86,10 +93,6 @@ def release_pipeline_lock() -> None:
 
 
 def _pid_is_running(pid: int) -> bool:
-    """
-    Comprueba si un PID está activo enviando señal 0.
-    PermissionError = el proceso existe pero pertenece a otro usuario → activo.
-    """
     try:
         os.kill(pid, 0)
         return True
@@ -105,9 +108,14 @@ def _pid_is_running(pid: int) -> bool:
 
 def load_state() -> dict:
     if not os.path.exists(STATE_PATH):
-        return {"last_run": None, "stages": {}}
+        return {"last_run": None, "first_run_complete": False, "stages": {}}
     with open(STATE_PATH, "r") as f:
         data = json.load(f)
+    # Migración: versiones anteriores no tenían first_run_complete como clave
+    # de primer nivel. Se infiere de stages para no perder el estado.
+    if "first_run_complete" not in data:
+        legacy = data.get("stages", {}).get("first_run_complete", {})
+        data["first_run_complete"] = legacy.get("status") == "ok"
     if "stages" not in data:
         data["stages"] = {}
     return data
@@ -133,7 +141,11 @@ def mark_stage(state: dict, stage: str, status: str = "ok", error=None) -> None:
 
 
 def is_first_run(state: dict) -> bool:
-    return state["stages"].get("first_run_complete", {}).get("status") != "ok"
+    """
+    Usa la clave de primer nivel 'first_run_complete', que persiste entre runs.
+    Ya no depende de 'stages', que se resetea al terminar cada pipeline exitoso.
+    """
+    return not state.get("first_run_complete", False)
 
 
 # ---------------------------------------------------------------------------
@@ -169,11 +181,7 @@ def run_cleanup(days: int = 7) -> None:
 
 def run_cleanup_rejected(days: int = 30) -> None:
     """
-    Elimina jobs rechazados por el filtro (filtered=0) o que nunca recibieron
-    score (filtered=1 pero score IS NULL), creados hace más de `days` días.
-
-    Sin esta limpieza los jobs descartados se acumulan indefinidamente,
-    ya que nunca pasan por output.py y por lo tanto nunca reciben delivered_at.
+    Elimina jobs rechazados por el filtro o sin score, creados hace más de `days` días.
     """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -214,12 +222,10 @@ def _run_pipeline_inner() -> None:
     init_db()
 
     if first_run:
-        pages = FIRST_RUN_PAGES
-        print(f"Modo: FIRST RUN — revisando {pages} páginas por keyword (~1 semana)")
+        print("Modo: FIRST RUN — el corte de antigüedad (7 días) aplica igual que en runs normales.")
+        print("      El scraper avanzará hasta encontrar ofertas más antiguas o llegar al tope de seguridad.")
     else:
-        pages = DAILY_RUN_PAGES
-        print(f"Modo: DAILY RUN — revisando {pages} páginas por keyword (~últimas 24h)")
-        print(f"Último run completo: {state['last_run']}")
+        print(f"Modo: DAILY RUN | Último run: {state['last_run']}")
 
     scrapers = load_scrapers()
     if not scrapers:
@@ -229,6 +235,7 @@ def _run_pipeline_inner() -> None:
         )
     print(f"Scrapers activos: {list(scrapers.keys())}")
     print(f"Keywords: {SCRAPE_KEYWORDS}")
+    print(f"Tope máximo de páginas por scraper: {MAX_PAGES_SAFETY}")
 
     # -------------------------------------------------------------------
     # Cleanup
@@ -242,16 +249,22 @@ def _run_pipeline_inner() -> None:
         mark_stage(state, "cleanup", status="error", error=str(e))
         raise
 
+    # -------------------------------------------------------------------
+    # Scraping
+    # -------------------------------------------------------------------
     print("\n=== SCRAPING ===")
     try:
         for name, run_scraper in scrapers.items():
             print(f"\n--- Scraper: {name} ---")
-            run_scraper(pages=pages, keywords=SCRAPE_KEYWORDS)
+            run_scraper(pages=MAX_PAGES_SAFETY, keywords=SCRAPE_KEYWORDS)
         mark_stage(state, "scraping")
     except Exception as e:
         mark_stage(state, "scraping", status="error", error=str(e))
         raise
 
+    # -------------------------------------------------------------------
+    # Filtering
+    # -------------------------------------------------------------------
     print("\n=== FILTERING ===")
     try:
         run_filter()
@@ -260,12 +273,11 @@ def _run_pipeline_inner() -> None:
         mark_stage(state, "filtering", status="error", error=str(e))
         raise
 
+    # -------------------------------------------------------------------
+    # Ranking
+    # -------------------------------------------------------------------
     print("\n=== RANKING ===")
     try:
-        # Import lazy: se realiza aquí y no al inicio del módulo.
-        # Esto garantiza que pipeline.py puede importarse sin tener openai
-        # instalado o .env configurado. El error ocurre solo si el ranker
-        # realmente se ejecuta, con un mensaje claro y accionable.
         from src.ranker import run_ranker
         run_ranker(limit=2000)
         mark_stage(state, "ranking")
@@ -273,6 +285,9 @@ def _run_pipeline_inner() -> None:
         mark_stage(state, "ranking", status="error", error=str(e))
         raise
 
+    # -------------------------------------------------------------------
+    # Output
+    # -------------------------------------------------------------------
     print("\n=== OUTPUT ===")
     try:
         run_output()
@@ -281,11 +296,12 @@ def _run_pipeline_inner() -> None:
         mark_stage(state, "output", status="error", error=str(e))
         raise
 
+    # Marcar first_run como completado en clave de primer nivel (persiste entre runs)
     if first_run:
-        mark_stage(state, "first_run_complete")
+        state["first_run_complete"] = True
 
     state["last_run"] = datetime.utcnow().isoformat()
-    state["stages"] = {}
+    state["stages"] = {}   # se resetean los stages de este run
     save_state(state)
 
     print(f"\nEstado actualizado: last_run = {state['last_run']}")

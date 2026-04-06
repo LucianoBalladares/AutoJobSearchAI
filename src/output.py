@@ -6,7 +6,6 @@ import json
 from src.db import DB_PATH
 
 OUTPUT_DIR = "output"
-OUTPUT_PATH = os.path.join(OUTPUT_DIR, "jobs_today.md")
 CONFIG_PATH = "config/output_config.json"
 
 
@@ -16,6 +15,16 @@ def load_min_score():
             return json.load(f).get("min_score", 6)
     except Exception:
         return 6
+
+
+def get_output_path() -> str:
+    """
+    Genera el path del archivo de output con fecha y hora en el nombre.
+    Formato: jobs_YYYY-MM-DD_HH-MM.md
+    Evita sobreescritura si el pipeline corre más de una vez al día.
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    return os.path.join(OUTPUT_DIR, f"jobs_{timestamp}.md")
 
 
 def fetch_jobs(min_score):
@@ -91,7 +100,7 @@ def mark_as_delivered(job_ids):
 
 def generate_markdown(jobs, min_score):
     lines = []
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines.append(f"# Jobs — {today}\n")
     lines.append(f"_Mostrando {len(jobs)} ofertas con score >= {min_score}_\n")
 
@@ -128,10 +137,12 @@ def run_output():
     mark_as_delivered(all_ids)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+    output_path = get_output_path()
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(md)
 
-    print(f"Output generado: {OUTPUT_PATH} ({len(jobs)} jobs en reporte)")
+    print(f"Output generado: {output_path} ({len(jobs)} jobs en reporte)")
+    return output_path
 
 
 if __name__ == "__main__":
