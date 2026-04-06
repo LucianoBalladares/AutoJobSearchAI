@@ -19,11 +19,13 @@ def load_min_score():
 
 def get_output_path() -> str:
     """
-    Genera el path del archivo de output con fecha y hora en el nombre.
-    Formato: jobs_YYYY-MM-DD_HH-MM.md
-    Evita sobreescritura si el pipeline corre más de una vez al día.
+    Genera el path del archivo de output con fecha y hora (incluyendo segundos)
+    en el nombre. Formato: jobs_YYYY-MM-DD_HH-MM-SS.md
+
+    Los segundos evitan colisión si el pipeline corre más de una vez
+    dentro del mismo minuto (retry manual, bug en el lock, etc.).
     """
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     return os.path.join(OUTPUT_DIR, f"jobs_{timestamp}.md")
 
 

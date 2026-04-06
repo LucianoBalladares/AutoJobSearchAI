@@ -13,19 +13,18 @@ Nueva estrategia en dos pasos:
 
 El ranker (LLM) es el componente inteligente del sistema. El filtro solo
 debe eliminar lo que definitivamente no encaja, no intentar pre-decidir el
-fit del candidato. 
+fit del candidato.
 
 El score mínimo en output_config.json actúa como segundo filtro de calidad
 después del ranker, completando el pipeline de tres capas:
   Filtro (bloqueo obvio) → Ranker (score 1-10) → Output (score >= min_score)
 """
 
-import sqlite3
-import json
 import re
 import unicodedata
+import json
 
-from src.db import DB_PATH
+from src.db import DB_PATH, get_connection
 
 KEYWORDS_PATH = "config/keywords.json"
 
@@ -124,71 +123,46 @@ def keyword_filter(
     return 1 if (has_health or has_data) else 0
 
 
-def init_column():
-    """Agrega la columna 'filtered' si no existe (migración segura)."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute("PRAGMA table_info(jobs)")
-    columns = [col[1] for col in c.fetchall()]
-
-    if "filtered" not in columns:
-        c.execute("ALTER TABLE jobs ADD COLUMN filtered INTEGER")
-
-    conn.commit()
-    conn.close()
-
-
 def run_filter():
-    init_column()
-
     keywords = load_keywords()
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    with get_connection() as conn:
+        c = conn.cursor()
 
-    rows = c.execute("""
-        SELECT id, title, description
-        FROM jobs
-        WHERE filtered IS NULL
-    """).fetchall()
+        rows = c.execute("""
+            SELECT id, title, description
+            FROM jobs
+            WHERE filtered IS NULL
+        """).fetchall()
 
-    accepted = rejected_negative = rejected_no_match = 0
+        accepted = rejected_negative = rejected_no_match = 0
 
-    for job_id, title, desc in rows:
-        text = f"{title} {desc or ''}"
-        t = normalize(text)
+        for job_id, title, desc in rows:
+            text = f"{title} {desc or ''}"
+            result = keyword_filter(
+                text,
+                positive_health=keywords["positive_health"],
+                positive_data=keywords["positive_data"],
+                negative=keywords["negative"],
+                negative_phrases=keywords["negative_phrases"],
+            )
 
-        # Paso 1 & 2: negativos — bloqueo duro
-        blocked = False
-        for phrase in keywords["negative_phrases"]:
-            if phrase in t:
-                blocked = True
-                break
-        if not blocked:
-            for word in keywords["negative"]:
-                if re.search(rf"\b{re.escape(word)}\b", t):
-                    blocked = True
-                    break
+            c.execute("UPDATE jobs SET filtered=? WHERE id=?", (result, job_id))
 
-        if blocked:
-            c.execute("UPDATE jobs SET filtered=0 WHERE id=?", (job_id,))
-            rejected_negative += 1
-            continue
-
-        # Paso 3: OR broad
-        has_health = _has_match(t, keywords["positive_health"])
-        has_data   = _has_match(t, keywords["positive_data"])
-
-        if has_health or has_data:
-            c.execute("UPDATE jobs SET filtered=1 WHERE id=?", (job_id,))
-            accepted += 1
-        else:
-            c.execute("UPDATE jobs SET filtered=0 WHERE id=?", (job_id,))
-            rejected_no_match += 1
-
-    conn.commit()
-    conn.close()
+            if result == 1:
+                accepted += 1
+            else:
+                # Distinguir motivo de rechazo para los logs
+                t = normalize(text)
+                blocked_by_negative = any(
+                    phrase in t for phrase in keywords["negative_phrases"]
+                ) or any(
+                    re.search(rf"\b{re.escape(w)}\b", t) for w in keywords["negative"]
+                )
+                if blocked_by_negative:
+                    rejected_negative += 1
+                else:
+                    rejected_no_match += 1
 
     print(
         f"Filtering done. "

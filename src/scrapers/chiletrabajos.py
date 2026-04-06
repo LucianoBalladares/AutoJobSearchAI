@@ -20,11 +20,13 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import time
+import random
 import re
 import sqlite3
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from src.db import init_db, get_connection
+from src.models import JobDict
 
 BASE_URL = "https://www.chiletrabajos.cl"
 
@@ -45,6 +47,11 @@ DEFAULT_MAX_PAGES = 50
 
 # Antigüedad máxima de ofertas a considerar.
 MAX_AGE_DAYS = 7
+
+# Rango de delay (segundos) entre requests de descripción individual.
+# El jitter aleatorio hace el patrón de requests menos predecible.
+DETAIL_DELAY_MIN = 0.8
+DETAIL_DELAY_MAX = 2.5
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +130,7 @@ def _is_too_old(date_str: str, max_age_days: int = MAX_AGE_DAYS) -> bool:
 # DB helpers
 # ---------------------------------------------------------------------------
 
-def save_job(job):
+def save_job(job: JobDict) -> bool:
     if not job.get("title") or not job.get("url"):
         return False
     with get_connection() as conn:
@@ -141,7 +148,7 @@ def save_job(job):
             return False
 
 
-def get_existing_urls():
+def get_existing_urls() -> set:
     with get_connection() as conn:
         c = conn.cursor()
         rows = c.execute("SELECT url FROM jobs").fetchall()
@@ -233,7 +240,7 @@ def scrape_page(category: str, page: int = 1, existing_urls: set = None):
 
     Retorna:
         (jobs, total_found, reached_cutoff)
-        - jobs: lista de dicts de ofertas nuevas parseadas
+        - jobs: lista de JobDict con las ofertas nuevas parseadas
         - total_found: número de ofertas en la página (0 = sin resultados)
         - reached_cutoff: True si alguna oferta superó MAX_AGE_DAYS
           → señal para que el loop externo deje de paginar esta categoría
@@ -263,7 +270,7 @@ def scrape_page(category: str, page: int = 1, existing_urls: set = None):
         print("  [info] Sin resultados — fin de categoría.")
         return [], 0, False
 
-    jobs = []
+    jobs: list[JobDict] = []
     reached_cutoff = False
 
     for link in job_links:
@@ -305,26 +312,26 @@ def scrape_page(category: str, page: int = 1, existing_urls: set = None):
                 print(f"  [skip] {title}")
                 continue
 
-            # Descripción completa
+            # Descripción completa con delay aleatorio para evitar detección
             full_description = get_job_description(job_url)
             existing_urls.add(job_url)
-            time.sleep(1)
+            time.sleep(random.uniform(DETAIL_DELAY_MIN, DETAIL_DELAY_MAX))
 
             description = full_description if full_description else excerpt
 
             if not description:
                 print(f"  [warn] Sin descripción para: {title}")
 
-            jobs.append({
-                "title": title,
-                "company": company,
-                "location": location,
-                "description": description,
-                "url": job_url,
-                "date": date_str,
-                "source": "chiletrabajos",
-                "created_at": datetime.utcnow().isoformat()
-            })
+            jobs.append(JobDict(
+                title=title,
+                company=company,
+                location=location,
+                description=description,
+                url=job_url,
+                date=date_str,
+                source="chiletrabajos",
+                created_at=datetime.utcnow().isoformat(),
+            ))
             print(f"  [+] {title} — {company} {'(sin desc)' if not description else ''}")
 
         except Exception as e:

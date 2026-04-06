@@ -1,11 +1,10 @@
 from dotenv import load_dotenv
-import sqlite3
 import os
 import re
 import time
 from openai import OpenAI, RateLimitError, APIConnectionError, APITimeoutError, APIStatusError
 
-from src.db import DB_PATH
+from src.db import get_connection
 
 load_dotenv()
 
@@ -216,15 +215,15 @@ def run_ranker(limit=20):
     model = _get_model()
     profile = load_profile()
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    with get_connection() as conn:
+        c = conn.cursor()
 
-    rows = c.execute("""
-        SELECT id, description
-        FROM jobs
-        WHERE filtered = 1 AND score IS NULL
-        LIMIT ?
-    """, (limit,)).fetchall()
+        rows = c.execute("""
+            SELECT id, description
+            FROM jobs
+            WHERE filtered = 1 AND score IS NULL
+            LIMIT ?
+        """, (limit,)).fetchall()
 
     print(f"Jobs a rankear: {len(rows)}")
 
@@ -238,8 +237,11 @@ def run_ranker(limit=20):
         score = score_job(client, model, desc, profile)
 
         if score is not None:
-            c.execute("UPDATE jobs SET score=? WHERE id=?", (score, job_id))
-            conn.commit()
+            # Commit individual: no perder trabajo acumulado si el batch se interrumpe.
+            with get_connection() as conn:
+                conn.cursor().execute(
+                    "UPDATE jobs SET score=? WHERE id=?", (score, job_id)
+                )
             print(f"  → score: {score}")
         else:
             print(f"  [skip] Job {job_id} sin score válido")
@@ -247,7 +249,6 @@ def run_ranker(limit=20):
         if i < len(rows):
             time.sleep(INTER_REQUEST_DELAY)
 
-    conn.close()
     print("Ranking done.")
 
 
