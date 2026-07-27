@@ -1,227 +1,161 @@
-# Sistema Automatizado de Búsqueda de Empleo con IA
+# AutoJobSearchAI — Guía del Proyecto
 
 ## 1. Objetivo
 
-Construir un sistema automatizado que permita:
+Sistema automatizado que:
 
-- Recolectar ofertas laborales relevantes
-- Filtrarlas inteligentemente
-- Priorizarlas según fit con el perfil
-- Optimizar el proceso de búsqueda de empleo
+- Recolecta ofertas laborales desde múltiples fuentes.
+- Elimina duplicados (URL única).
+- Filtra por título de puesto deseado (match de texto, sin IA).
+- Purga automáticamente ofertas con más de 7 días de antigüedad.
+- Genera un reporte diario en Markdown con los links.
 
-Meta: Maximizar entrevistas en el menor tiempo posible.
+La optimización de CV y la postulación siguen siendo manuales, fuera
+de este sistema.
 
----
+## 2. Por qué se simplificó
 
-## 2. Arquitectura General
+La versión anterior incluía un ranking con LLM (OpenAI) que evaluaba
+el fit de cada oferta en una escala 1–10, y una etapa de optimización
+de CV asistida por IA. Ambas se descartaron:
 
-Pipeline:
+- El ranking dependía de la descripción completa de cada oferta, que
+  el scraper obtenía visitando la página de detalle de cada job. Esa
+  request adicional fallaba con frecuencia (parseo frágil, HTML
+  variable, posible rate-limiting), dejando al LLM sin texto que
+  evaluar la mayoría de las veces — lo que hacía el ranking inútil en
+  la práctica.
+- La optimización de CV con IA no producía resultados usables; se
+  terminaba haciendo manualmente de todas formas.
 
-Job Scraper → Job Database → Filtering → AI Ranking → Output
+La solución no fue arreglar esas piezas, sino eliminarlas: el filtrado
+ahora es determinístico (título vs. lista de títulos deseados) y no
+depende de la descripción completa del job ni de ninguna API externa.
 
-Salida diaria:
+## 3. Arquitectura
 
-- Lista priorizada de empleos
+```
+Scraper (título, empresa, ubicación, extracto, link)
+        ↓
+DB SQLite (url UNIQUE → dedup automático)
+        ↓
+Filter (¿el título matchea desired_titles.json?)
+        ↓
+Output (jobs_YYYY-MM-DD.md)
+        ↓
+Cleanup (purga jobs con created_at > 7 días)
+```
 
----
+## 4. Componentes
 
-## 3. Componentes del Sistema
+### 4.1 Scrapers (`src/scrapers/`)
 
-### 3.1 Job Scraper
+Autodiscovery: cualquier módulo que exporte
+`run_scraper(pages: int, keywords: list[str])` se carga automáticamente.
+No hace falta tocar `pipeline.py` para agregar uno nuevo.
 
-Función:
-Recolectar ofertas desde múltiples fuentes.
+Fuente activa actualmente:
 
-Fuentes:
+- **Chiletrabajos** — categorías fijas, no usa `keywords`. Ya NO
+  visita la página de detalle de cada oferta; usa solo lo disponible
+  en el listado (título, empresa, ubicación, extracto).
 
-- LinkedIn
-- Indeed
-- Chiletrabajos
-- Empleos Públicos
-- GetOnBoard
+Fuentes pendientes de evaluar (a discutir antes de construir):
 
-Tecnologías:
+- GetOnBoard — sin protección anti-bot agresiva conocida, buen fit
+  con roles data/tech. Riesgo técnico bajo.
+- Empleos Públicos — sitio de gobierno, generalmente sin protección
+  agresiva. Riesgo técnico bajo.
+- Indeed — protección Cloudflare fuerte, riesgo de bloqueo.
+- LinkedIn — requiere sesión autenticada, viola sus ToS, alto
+  mantenimiento y riesgo de bloqueo de cuenta.
 
-- Python
-- Requests
-- BeautifulSoup
-- Playwright (para sitios dinámicos)
+### 4.2 Base de datos (`src/db.py`)
 
-Datos a recolectar:
+Tabla `jobs`:
 
-- title
-- company
-- location
-- salary
-- description
-- url
-- date
-- source
+| columna      | tipo        | uso                                                    |
+| ------------ | ----------- | ------------------------------------------------------ |
+| id           | INTEGER PK  | —                                                      |
+| title        | TEXT        | título de la oferta                                    |
+| company      | TEXT        | empresa                                                |
+| location     | TEXT        | ubicación                                              |
+| description  | TEXT        | extracto del listado (no descripción completa)         |
+| url          | TEXT UNIQUE | dedup                                                  |
+| date         | TEXT        | fecha tal como la muestra el sitio                     |
+| source       | TEXT        | nombre del scraper                                     |
+| created_at   | TEXT        | timestamp de scraping — base de la retención de 7 días |
+| filtered     | INTEGER     | 1 = título coincide con desired_titles.json            |
+| delivered_at | TEXT        | timestamp de cuándo se incluyó en un reporte           |
 
----
+La columna `score` (del ranking con IA) fue eliminada. `init_db()`
+migra automáticamente bases de datos antiguas que aún la tengan.
 
-### 3.2 Base de Datos
+### 4.3 Filtro (`src/filter.py`)
 
-Opciones:
+Compara el título normalizado (sin acentos, minúsculas) contra
+`config/desired_titles.json`:
 
-- CSV (simple)
-- SQLite (recomendado)
+1. Si contiene algún `exclude_terms` → rechazado.
+2. Si no, y contiene algún `desired_titles` (substring) → aceptado.
+3. Si no matchea nada → rechazado.
 
-Estructura sugerida:
+Opera solo sobre el título, no sobre la descripción.
 
-Tabla: jobs
+### 4.4 Output (`src/output.py`)
 
-- id
-- title
-- company
-- location
-- description
-- url
-- date
-- source
-- score
+Genera `output/jobs_<fecha>.md` con todas las ofertas `filtered=1` y
+`delivered_at IS NULL`. Al generarse el reporte, esas ofertas se
+marcan como entregadas para no repetirse en el próximo run.
 
-Tabla: applications
+### 4.5 Cleanup (`src/pipeline.py`)
 
-- id
-- job_id
-- date_applied
-- status
-- response
+Una sola regla: se elimina cualquier oferta con `created_at` de hace
+más de 7 días, haya sido entregada o no.
 
----
+## 5. Flujo diario
 
-### 3.3 Filtering (Pre-AI)
+1. Correr `python3 -m src.pipeline` (manual o vía cron).
+2. Abrir el `jobs_<fecha>.md` generado en `/output`.
+3. Revisar los links.
+4. Ajustar CV manualmente por oferta.
+5. Postular.
 
-Filtro por keywords:
-_Keywords temporales, cambiaran a futuro_
-Positivas:
+## 6. Estructura del proyecto
 
-- data
-- analista
-- bi
-- salud
-- hospital
-- analytics
-
-Negativas:
-
-- senior
-- ventas
-- call center
-
----
-
-### 3.4 AI Ranking
-
-Objetivo:
-Evaluar qué tan bien encaja cada trabajo con el perfil.
-
-Input:
-
-- Descripción del trabajo
-- Perfil del candidato
-
-Output:
-
-- Score (1–10)
-
-Ejemplo de prompt:
-
-"Evaluate this job description for a candidate with:
-
-- Medical Technologist
-- Health Informatics training
-- Power BI, SQL, Python
-- English C2
-
-Score from 1 to 10 and justify briefly."
-
----
-
-### 3.6 Output
-
-Archivo generado diariamente:
-
-jobs_today.md
-
-Contenido:
-
-- Top trabajos
-- Score
-- Links
-
----
-
-## 4. Automatización
-
-Uso de cron (Linux):
-Ejecuta diariamente:
-
-- Scraping
-- Filtrado
-- Ranking
-
----
-
-## 5. Flujo Diario de Uso
-
-1. Abrir jobs_today.md
-2. Revisar top trabajos
-3. Ajustar CV de manera manual
-4. Enviar postulaciones
-
----
-
-## 6. Estructura del Proyecto
-
-/job-search-ai
-
+```
 /src
-
-- scraper.py
-- filter.py
-- ranker.py
-- pipeline.py
-- output.py
-
-/src/scrapers
-
-- chiletrabajos.py
-- indeed.py
-- getonboard.py
-- linkedin.py
-
-/data
-
-- jobs.db
-- applications.csv
-
-/output
-
-- jobs_today.md
+  db.py
+  filter.py
+  output.py
+  pipeline.py
+  models.py
+  /scrapers
+    __init__.py
+    chiletrabajos.py
 
 /config
+  desired_titles.json
+  state.json          (autogenerado)
 
-- keywords.json
-- profile.txt
+/data
+  jobs.db             (gitignored)
 
----
+/output
+  jobs_*.md           (gitignored)
+```
 
-## 7. Stack Tecnológico
+## 7. Stack
 
 - Python
 - SQLite
-- OpenAI API
-- Playwright
-- Pandas
+- Requests + BeautifulSoup
+- tenacity (reintentos HTTP)
 
----
+Sin dependencia de OpenAI ni de ningún LLM.
 
-## 8. Métricas Clave
+## 8. Pendiente / a decidir
 
-- Número de postulaciones diarias
-- Tasa de respuesta
-- Tasa de entrevistas
-
----
+- Qué scrapers nuevos construir y en qué orden.
+- Afinar `desired_titles.json` con la lista real y definitiva de
+  títulos (el archivo actual trae un draft de partida, editable).
