@@ -1,0 +1,15 @@
+{
+  "desired_titles": [
+    "analista de datos",
+    "data analyst",
+    "analista bi",
+    "bi analyst",
+    "business intelligence analyst",
+    "analista de business intelligence",
+    "informática en salud",
+    "health informatics"
+  ],
+  "exclude_terms": [
+    "senior"
+  ]
+}
