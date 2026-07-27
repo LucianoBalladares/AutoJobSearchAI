@@ -1,16 +1,27 @@
 """
 Scraper para Chiletrabajos.cl
 
+Cambio importante (simplificación, sin fetch de detalle):
+-----------------------------------------------------------
+La versión anterior visitaba la página individual de cada oferta para
+obtener la descripción completa (get_job_description). Esa request
+adicional era el punto de falla más frecuente del pipeline: parseo
+frágil, HTML variable entre ofertas, y probable rate-limiting al hacer
+una request por cada job. En la práctica, la descripción completa no
+se podía obtener la mayoría de las veces.
+
+Ya no se necesita: el filtro ahora solo compara el título del job
+contra la lista de títulos deseados (src/filter.py), no la descripción.
+Por eso se eliminó por completo el fetch a la página de detalle. Se usa
+únicamente lo que ya viene en la página de listado (título, empresa,
+ubicación, extracto). Esto además hace el scraper considerablemente más
+rápido, ya que elimina una request HTTP + delay por cada oferta nueva.
+
 Estrategia de corte:
 --------------------
 En lugar de usar un número fijo de páginas, el scraper avanza página a página
 dentro de cada categoría y se detiene cuando detecta que las ofertas publicadas
 superan MAX_AGE_DAYS días de antigüedad.
-
-Esto resuelve dos problemas del diseño anterior:
-1. En el primer run siempre revisaba 25 páginas aunque no hubiera nada nuevo.
-2. En runs posteriores podía perderse ofertas si la ventana de 2 páginas vacías
-   se activaba antes de llegar al límite de antigüedad real.
 
 El parámetro `pages` de la interfaz estándar se usa solo como tope de seguridad
 (max_pages) para evitar loops infinitos ante cambios en el sitio.
@@ -20,7 +31,6 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import time
-import random
 import re
 import sqlite3
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -47,11 +57,6 @@ DEFAULT_MAX_PAGES = 50
 
 # Antigüedad máxima de ofertas a considerar.
 MAX_AGE_DAYS = 7
-
-# Rango de delay (segundos) entre requests de descripción individual.
-# El jitter aleatorio hace el patrón de requests menos predecible.
-DETAIL_DELAY_MIN = 0.8
-DETAIL_DELAY_MAX = 2.5
 
 
 # ---------------------------------------------------------------------------
@@ -170,55 +175,6 @@ def _fetch(url, headers=None):
 
 
 # ---------------------------------------------------------------------------
-# Descripción completa
-# ---------------------------------------------------------------------------
-
-def get_job_description(url: str) -> str:
-    """
-    Obtiene la descripción completa desde la página individual de la oferta.
-    """
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = _fetch(url, headers=headers)
-        if r.status_code != 200:
-            print(f"  [warn] HTTP {r.status_code} en {url}")
-            return ""
-    except requests.RequestException as e:
-        print(f"  [error] No se pudo obtener descripción ({url}): {e}")
-        return ""
-
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    # Intento 1: buscar el h3 "Descripción oferta de trabajo"
-    for h3 in soup.find_all("h3"):
-        if "descripci" in h3.get_text(strip=True).lower():
-            parts = []
-            for sibling in h3.next_siblings:
-                if sibling.name in ("h3", "h2", "h4", "hr", "table"):
-                    break
-                text = sibling.get_text(separator=" ", strip=True) if hasattr(sibling, "get_text") else str(sibling).strip()
-                if text:
-                    parts.append(text)
-            result = " ".join(parts).strip()
-            if result:
-                return result
-
-    # Intento 2: ID legacy
-    desc = soup.select_one("#descripcion")
-    if desc:
-        return desc.get_text(separator=" ", strip=True)
-
-    # Intento 3: heurística de último recurso
-    main = soup.select_one("div.col-md-8, div.job-detail, article, main")
-    if main:
-        text = main.get_text(separator=" ", strip=True)
-        if len(text) > 100:
-            return text[:3000]
-
-    return ""
-
-
-# ---------------------------------------------------------------------------
 # URL builder
 # ---------------------------------------------------------------------------
 
@@ -236,7 +192,9 @@ def build_category_url(category: str, page: int) -> str:
 
 def scrape_page(category: str, page: int = 1, existing_urls: set = None):
     """
-    Scrapea una página de una categoría.
+    Scrapea una página de una categoría usando solo la información del
+    listado (título, empresa, ubicación, extracto) — sin visitar la
+    página de detalle de cada oferta.
 
     Retorna:
         (jobs, total_found, reached_cutoff)
@@ -312,15 +270,13 @@ def scrape_page(category: str, page: int = 1, existing_urls: set = None):
                 print(f"  [skip] {title}")
                 continue
 
-            # Descripción completa con delay aleatorio para evitar detección
-            full_description = get_job_description(job_url)
             existing_urls.add(job_url)
-            time.sleep(random.uniform(DETAIL_DELAY_MIN, DETAIL_DELAY_MAX))
 
-            description = full_description if full_description else excerpt
-
+            # Descripción = extracto del listado. Ya no se visita la página
+            # de detalle (ver docstring del módulo).
+            description = excerpt
             if not description:
-                print(f"  [warn] Sin descripción para: {title}")
+                print(f"  [warn] Sin extracto disponible para: {title}")
 
             jobs.append(JobDict(
                 title=title,
@@ -332,7 +288,7 @@ def scrape_page(category: str, page: int = 1, existing_urls: set = None):
                 source="chiletrabajos",
                 created_at=datetime.utcnow().isoformat(),
             ))
-            print(f"  [+] {title} — {company} {'(sin desc)' if not description else ''}")
+            print(f"  [+] {title} — {company}")
 
         except Exception as e:
             print(f"  Error en oferta: {e}")
