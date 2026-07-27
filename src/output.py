@@ -1,20 +1,19 @@
+"""
+Genera el reporte diario de ofertas laborales.
+
+Sin ranking por IA: se incluyen todas las ofertas con filtered=1
+(título coincide con desired_titles.json) que aún no fueron entregadas.
+No hay score ni umbral de calidad — el filtro de título ya es la única
+capa de decisión.
+"""
+
 import sqlite3
 from datetime import datetime
 import os
-import json
 
 from src.db import DB_PATH
 
 OUTPUT_DIR = "output"
-CONFIG_PATH = "config/output_config.json"
-
-
-def load_min_score():
-    try:
-        with open(CONFIG_PATH, "r") as f:
-            return json.load(f).get("min_score", 6)
-    except Exception:
-        return 6
 
 
 def get_output_path() -> str:
@@ -29,9 +28,10 @@ def get_output_path() -> str:
     return os.path.join(OUTPUT_DIR, f"jobs_{timestamp}.md")
 
 
-def fetch_jobs(min_score):
+def fetch_jobs():
     """
-    Retorna jobs con score >= min_score que aún no han sido entregados.
+    Retorna jobs con título coincidente (filtered=1) que aún no han sido
+    entregados en un reporte anterior.
     """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -39,47 +39,19 @@ def fetch_jobs(min_score):
         c.execute("PRAGMA table_info(jobs)")
         columns = {col[1] for col in c.fetchall()}
 
-        if "score" not in columns:
-            print("Warning: columna 'score' no existe. Ejecuta el ranker primero.")
-            return []
-
         if "delivered_at" not in columns:
             print("Warning: columna 'delivered_at' no existe. Ejecuta init_db() primero.")
             return []
 
         rows = c.execute("""
-            SELECT id, title, company, location, url, score, date
+            SELECT id, title, company, location, url, date
             FROM jobs
             WHERE filtered = 1
-              AND score >= ?
               AND delivered_at IS NULL
-            ORDER BY score DESC
-        """, (min_score,)).fetchall()
+            ORDER BY id DESC
+        """).fetchall()
 
         return list(rows)
-    finally:
-        conn.close()
-
-
-def fetch_all_ranked_undelivered():
-    """
-    Retorna IDs de todos los jobs que ya fueron rankeados pero aún no
-    marcados como delivered, independientemente de su score.
-
-    Esto garantiza que jobs con score bajo no queden huérfanos en la DB
-    indefinidamente: se marcan como delivered aunque no aparezcan en el output,
-    lo que permite que el cleanup de 7 días los elimine correctamente.
-    """
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    try:
-        rows = c.execute("""
-            SELECT id FROM jobs
-            WHERE filtered = 1
-              AND score IS NOT NULL
-              AND delivered_at IS NULL
-        """).fetchall()
-        return [r[0] for r in rows]
     finally:
         conn.close()
 
@@ -100,26 +72,21 @@ def mark_as_delivered(job_ids):
     print(f"{len(job_ids)} jobs marcados como delivered.")
 
 
-def generate_markdown(jobs, min_score):
+def generate_markdown(jobs):
     lines = []
     today = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines.append(f"# Jobs — {today}\n")
-    lines.append(f"_Mostrando {len(jobs)} ofertas con score >= {min_score}_\n")
+    lines.append(f"_Mostrando {len(jobs)} ofertas nuevas que coinciden con tus títulos deseados_\n")
 
     if not jobs:
-        lines.append("_No hay jobs nuevos con score suficiente hoy._")
+        lines.append("_No hay jobs nuevos hoy._")
         return "\n".join(lines)
 
-    for i, (job_id, title, company, location, url, score, date) in enumerate(jobs, 1):
-        filled = "█" * score
-        empty = "░" * (10 - score)
-        score_bar = f"{filled}{empty} {score}/10"
-
+    for i, (job_id, title, company, location, url, date) in enumerate(jobs, 1):
         lines.append(f"## {i}. {title}")
-        lines.append(f"- **Empresa:** {company}")
+        lines.append(f"- **Empresa:** {company or 'No especificada'}")
         lines.append(f"- **Ubicación:** {location or 'No especificada'}")
         lines.append(f"- **Publicado:** {date or 'Sin fecha'}")
-        lines.append(f"- **Score:** {score_bar}")
         lines.append(f"- **Link:** {url}")
         lines.append("")
 
@@ -127,16 +94,11 @@ def generate_markdown(jobs, min_score):
 
 
 def run_output():
-    min_score = load_min_score()
-    jobs = fetch_jobs(min_score)
+    jobs = fetch_jobs()
+    md = generate_markdown(jobs)
 
-    md = generate_markdown(jobs, min_score)
-
-    # Marca como delivered TODOS los jobs rankeados pendientes, no solo
-    # los que aparecen en el output. Los de score bajo también se marcan
-    # para que el cleanup de 7 días pueda eliminarlos correctamente.
-    all_ids = fetch_all_ranked_undelivered()
-    mark_as_delivered(all_ids)
+    job_ids = [row[0] for row in jobs]
+    mark_as_delivered(job_ids)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = get_output_path()
