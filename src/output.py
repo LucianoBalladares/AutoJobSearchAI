@@ -11,7 +11,7 @@ import sqlite3
 from datetime import datetime
 import os
 
-from src.db import DB_PATH
+from src.db import DB_PATH, ensure_db_dir
 
 OUTPUT_DIR = "output"
 
@@ -33,6 +33,7 @@ def fetch_jobs():
     Retorna jobs con título coincidente (filtered=1) que aún no han sido
     entregados en un reporte anterior.
     """
+    ensure_db_dir()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
@@ -59,6 +60,7 @@ def fetch_jobs():
 def mark_as_delivered(job_ids):
     if not job_ids:
         return
+    ensure_db_dir()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     now = datetime.utcnow().isoformat()

@@ -24,10 +24,22 @@ El wrapper contextmanager aquí resuelve ambas cosas a la vez:
 commit/rollback + cierre garantizado.
 """
 
+import os
 import sqlite3
 from contextlib import contextmanager
 
 DB_PATH = "data/jobs.db"
+
+
+def ensure_db_dir() -> None:
+    """
+    Crea el directorio de DB_PATH si no existe. sqlite3.connect() no crea
+    carpetas faltantes por su cuenta y falla con 'unable to open database
+    file' — típicamente al clonar el repo, ya que data/ está gitignored.
+    Cualquier módulo que conecte directo a sqlite3 (no solo get_connection())
+    debe llamar a esto primero.
+    """
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
 
 
 @contextmanager
@@ -43,6 +55,7 @@ def get_connection():
             c.execute(...)
             conn.commit()   # opcional: get_connection ya hace commit al salir
     """
+    ensure_db_dir()
     conn = sqlite3.connect(DB_PATH)
     try:
         yield conn

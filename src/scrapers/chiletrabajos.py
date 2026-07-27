@@ -63,10 +63,18 @@ MAX_AGE_DAYS = 7
 # Parseo de fechas de Chiletrabajos
 # ---------------------------------------------------------------------------
 
+_MESES_ES = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+    "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+}
+
+
 def _parse_date_chiletrabajos(date_str: str) -> datetime | None:
     """
     Intenta parsear la fecha publicada por Chiletrabajos.
     El sitio usa formatos variables:
+      - "15 de Junio de 2026"   (formato real observado en el listado actual)
       - "Publicado: 01/04/2026"
       - "01/04/2026"
       - "Hace 3 días"
@@ -99,6 +107,17 @@ def _parse_date_chiletrabajos(date_str: str) -> datetime | None:
     m = re.search(r"(\d+)\s+d[íi]a[s]?\s+atr[áa]s", text)
     if m:
         return today - timedelta(days=int(m.group(1)))
+
+    # Formato "DD de Mes de YYYY" (ej. "15 de Junio de 2026") — formato
+    # actual del listado de Chiletrabajos, confirmado contra el sitio real.
+    m = re.match(r"(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})", text)
+    if m:
+        month = _MESES_ES.get(m.group(2))
+        if month:
+            try:
+                return datetime(int(m.group(3)), month, int(m.group(1)))
+            except ValueError:
+                pass
 
     # Formato DD/MM/YYYY
     m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
