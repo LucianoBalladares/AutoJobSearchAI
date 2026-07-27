@@ -1,32 +1,29 @@
 """
-Módulo de filtrado por keywords para AutoJobSearchAI.
+Módulo de filtrado por título de puesto para AutoJobSearchAI.
 
-Estrategia: bloqueo de negativos + OR broad (revisión post-auditoría)
-----------------------------------------------------------------------
-Nueva estrategia en dos pasos:
+Reemplaza al sistema anterior de keywords por categoría (salud/data,
+positivas/negativas). Ahora la regla es simple y explícita, y opera
+solo sobre el título del job (no sobre la descripción):
 
-1. BLOQUEO DURO: si el texto contiene frases o palabras negativas → filtered=0.
-   Esto elimina lo obviamente irrelevante sin depender del LLM.
+1. Si el título contiene alguno de los 'exclude_terms' (ej. "senior")
+   → filtered=0, sin importar lo demás.
+2. Si no, y el título contiene alguno de los 'desired_titles' (match de
+   substring, no exacto — "analista de datos" matchea también
+   "analista de datos junior", "analista de datos y bi", etc.)
+   → filtered=1.
+3. Si no matchea ningún título deseado → filtered=0.
 
-2. PASS BROAD: si el texto contiene al menos UNA keyword de positive_health
-   OR al menos UNA de positive_data → filtered=1 y pasa al ranker.
-
-El ranker (LLM) es el componente inteligente del sistema. El filtro solo
-debe eliminar lo que definitivamente no encaja, no intentar pre-decidir el
-fit del candidato.
-
-El score mínimo en output_config.json actúa como segundo filtro de calidad
-después del ranker, completando el pipeline de tres capas:
-  Filtro (bloqueo obvio) → Ranker (score 1-10) → Output (score >= min_score)
+La lista de títulos deseados y de exclusión vive en
+config/desired_titles.json para poder editarla sin tocar código.
 """
 
 import re
 import unicodedata
 import json
 
-from src.db import DB_PATH, get_connection
+from src.db import get_connection
 
-KEYWORDS_PATH = "config/keywords.json"
+TITLES_PATH = "config/desired_titles.json"
 
 
 def normalize(text: str) -> str:
@@ -41,135 +38,76 @@ def normalize(text: str) -> str:
     return text
 
 
-def load_keywords() -> dict:
+def load_desired_titles() -> dict:
     """
-    Carga y pre-normaliza keywords desde el JSON de configuración.
+    Carga y pre-normaliza la config de títulos deseados/excluidos.
     Lanza una excepción explícita si el archivo no existe o tiene
     sintaxis inválida.
 
-    Retorna un dict con las claves:
-        positive_health, positive_data, negative, negative_phrases
+    Retorna un dict con las claves: desired_titles, exclude_terms.
     """
     try:
-        with open(KEYWORDS_PATH, "r", encoding="utf-8") as f:
+        with open(TITLES_PATH, "r", encoding="utf-8") as f:
             raw = json.load(f)
     except FileNotFoundError:
         raise FileNotFoundError(
-            f"Archivo de keywords no encontrado: {KEYWORDS_PATH}. "
+            f"Archivo de títulos deseados no encontrado: {TITLES_PATH}. "
             "Asegúrate de que el archivo existe antes de correr el filtro."
         )
     except json.JSONDecodeError as e:
         raise ValueError(
-            f"Error de sintaxis en {KEYWORDS_PATH}: {e}. "
+            f"Error de sintaxis en {TITLES_PATH}: {e}. "
             "Verifica que el JSON sea válido antes de continuar."
         )
 
     return {
-        "positive_health":  [normalize(k) for k in raw.get("positive_health", [])],
-        "positive_data":    [normalize(k) for k in raw.get("positive_data", [])],
-        "negative":         [normalize(k) for k in raw.get("negative", [])],
-        "negative_phrases": [normalize(k) for k in raw.get("negative_phrases", [])],
+        "desired_titles": [normalize(t) for t in raw.get("desired_titles", [])],
+        "exclude_terms":  [normalize(t) for t in raw.get("exclude_terms", [])],
     }
 
 
-def _has_match(text: str, keywords: list[str]) -> bool:
+def title_matches(title: str, desired_titles: list[str], exclude_terms: list[str]) -> bool:
     """
-    Retorna True si el texto contiene al menos una de las keywords
-    como palabra completa (boundary \\b).
-    Funciona para keywords de una o múltiples palabras.
+    True si el título coincide con algún título deseado Y no contiene
+    ningún término de exclusión.
+
+    exclude_terms usa word boundary (\\b) para no rechazar por accidente
+    substrings dentro de otra palabra. desired_titles usa substring plano
+    porque son frases (a veces multi-palabra) y queremos match amplio.
     """
-    for kw in keywords:
-        if re.search(rf"\b{re.escape(kw)}\b", text):
-            return True
-    return False
+    t = normalize(title or "")
 
+    for term in exclude_terms:
+        if re.search(rf"\b{re.escape(term)}\b", t):
+            return False
 
-def keyword_filter(
-    text: str,
-    positive_health: list[str],
-    positive_data: list[str],
-    negative: list[str],
-    negative_phrases: list[str],
-) -> int:
-    """
-    Filtro en tres pasos sobre texto ya normalizado:
-
-    1. Rechaza si contiene alguna frase negativa exacta (multi-palabra).
-    2. Rechaza si contiene alguna palabra negativa como palabra completa.
-    3. Acepta si contiene al menos UNA keyword de positive_health
-       OR al menos UNA keyword de positive_data.
-       → Si ninguna categoría hace match, rechaza.
-
-    El OR broad deja pasar ofertas de datos sin mención explícita de salud
-    (contexto puede estar en la empresa, no en el texto) y viceversa.
-    El ranker decide el fit real con score 1-10.
-    """
-    t = normalize(text)
-
-    # Paso 1: frases negativas exactas
-    for phrase in negative_phrases:
-        if phrase in t:
-            return 0
-
-    # Paso 2: palabras negativas con word boundary
-    for word in negative:
-        if re.search(rf"\b{re.escape(word)}\b", t):
-            return 0
-
-    # Paso 3: OR broad — basta con que haga match en cualquiera de las dos categorías
-    has_health = _has_match(t, positive_health)
-    has_data   = _has_match(t, positive_data)
-
-    return 1 if (has_health or has_data) else 0
+    return any(wanted in t for wanted in desired_titles)
 
 
 def run_filter():
-    keywords = load_keywords()
+    config = load_desired_titles()
 
     with get_connection() as conn:
         c = conn.cursor()
 
         rows = c.execute("""
-            SELECT id, title, description
+            SELECT id, title
             FROM jobs
             WHERE filtered IS NULL
         """).fetchall()
 
-        accepted = rejected_negative = rejected_no_match = 0
+        accepted = rejected = 0
 
-        for job_id, title, desc in rows:
-            text = f"{title} {desc or ''}"
-            result = keyword_filter(
-                text,
-                positive_health=keywords["positive_health"],
-                positive_data=keywords["positive_data"],
-                negative=keywords["negative"],
-                negative_phrases=keywords["negative_phrases"],
-            )
-
+        for job_id, title in rows:
+            result = 1 if title_matches(title, config["desired_titles"], config["exclude_terms"]) else 0
             c.execute("UPDATE jobs SET filtered=? WHERE id=?", (result, job_id))
 
             if result == 1:
                 accepted += 1
             else:
-                # Distinguir motivo de rechazo para los logs
-                t = normalize(text)
-                blocked_by_negative = any(
-                    phrase in t for phrase in keywords["negative_phrases"]
-                ) or any(
-                    re.search(rf"\b{re.escape(w)}\b", t) for w in keywords["negative"]
-                )
-                if blocked_by_negative:
-                    rejected_negative += 1
-                else:
-                    rejected_no_match += 1
+                rejected += 1
 
-    print(
-        f"Filtering done. "
-        f"Aceptados: {accepted} | "
-        f"Rechazados por negativos: {rejected_negative} | "
-        f"Sin match en ninguna categoría: {rejected_no_match}"
-    )
+    print(f"Filtering done. Aceptados: {accepted} | Rechazados: {rejected}")
 
 
 if __name__ == "__main__":
