@@ -2,12 +2,23 @@
   "desired_titles": [
     "analista de datos",
     "data analyst",
+    "analista de base de datos",
+    "database analyst",
+    "analista de datos clinicos",
+    "clinical data analyst",
     "analista bi",
     "bi analyst",
     "business intelligence analyst",
     "analista de business intelligence",
+    "ingeniero de datos",
+    "data engineer",
     "informática en salud",
-    "health informatics"
+    "health informatics",
+    "informática médica",
+    "medical informatics",
+    "analista de procesos y calidad",
+    "científico de datos",
+    "data scientist"
   ],
   "exclude_terms": [
     "senior"
