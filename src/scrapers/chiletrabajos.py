@@ -32,11 +32,11 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import time
 import re
-import sqlite3
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from src.db import init_db, get_connection
+from src.db import init_db
 from src.models import JobDict
+from src.scrapers._common import save_job, get_existing_urls
 
 BASE_URL = "https://www.chiletrabajos.cl"
 
@@ -148,35 +148,6 @@ def _is_too_old(date_str: str, max_age_days: int = MAX_AGE_DAYS) -> bool:
         return False
     cutoff = datetime.now() - timedelta(days=max_age_days)
     return dt < cutoff
-
-
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
-
-def save_job(job: JobDict) -> bool:
-    if not job.get("title") or not job.get("url"):
-        return False
-    with get_connection() as conn:
-        c = conn.cursor()
-        try:
-            c.execute("""
-            INSERT INTO jobs (title, company, location, description, url, date, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                job["title"], job["company"], job["location"], job["description"],
-                job["url"], job["date"], job["source"], job["created_at"]
-            ))
-            return True
-        except sqlite3.IntegrityError:
-            return False
-
-
-def get_existing_urls() -> set:
-    with get_connection() as conn:
-        c = conn.cursor()
-        rows = c.execute("SELECT url FROM jobs").fetchall()
-    return set(r[0] for r in rows)
 
 
 # ---------------------------------------------------------------------------
